@@ -573,8 +573,11 @@ impl App {
         };
         match project::load(&bytes) {
             Ok(project) => {
-                // Un PNG suelto se importa sin ruta, para que "Guardar" no lo sobrescriba sin preguntar.
-                let is_project = project::is_project(&bytes);
+                // Un PNG suelto se importa sin ruta, para que "Guardar" no lo sobrescriba sin
+                // preguntar. Los de la biblioteca sí la conservan: ya son copias de la app.
+                let in_library = library_view::library_dir(&self.settings)
+                    .is_some_and(|d| path.parent() == Some(d.as_path()));
+                let is_project = project::is_project(&bytes) || in_library;
                 let key = if is_project {
                     "status-opened"
                 } else {

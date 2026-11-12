@@ -60,6 +60,10 @@ impl App {
                 egui::CollapsingHeader::new(i.tr("settings-advanced")).show(ui, |ui| {
                     reset = ui.button(i.tr("settings-reset")).clicked();
                     show_log = ui.button(i.tr("settings-view-log")).clicked();
+                    ui.label(i.tr_args(
+                        "about-version",
+                        &[("version", env!("CARGO_PKG_VERSION").into())],
+                    ));
                     ui.label(i.tr("settings-data-path"));
                     for p in [settings::log::data_dir(), self.settings_path.clone()]
                         .into_iter()

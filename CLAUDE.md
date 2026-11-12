@@ -29,7 +29,7 @@ La CI (`.github/workflows/ci.yml`) ejecuta `fmt`, `clippy` y `test` en Linux y e
 |---|---|
 | Interfaz | `eframe` / `egui` |
 | Vista 3D | `wgpu` (a través de eframe) |
-| PNG | `image` y `png` (este último para los bloques de texto del PNG) |
+| Imágenes | `image` (PNG y JPEG) y `png` (este último para los bloques de texto del PNG) |
 | Ajustes | `serde` con RON |
 | Traducciones | `fluent-bundle`, y `sys-locale` para detectar el idioma del sistema |
 | Diálogos de archivo | `rfd` |

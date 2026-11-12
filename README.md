@@ -26,6 +26,7 @@
 - **Herramientas:** lápiz, borrador, bote de pintura, cuentagotas, degradado, sello y selección rectangular.
 - **Espejo:** lo que pintas en un brazo o una pierna se copia al lado opuesto. Funciona para todo el cuerpo o solo para la parte elegida.
 - **Capas:** capa base y capa exterior. Cada parte y cada capa se puede mostrar u ocultar por separado.
+- **Imagen al frente:** cualquier PNG o JPEG, recortado y ajustado, pintado sobre el frente de todo el cuerpo.
 - **Plantillas:** una base para empezar, más camiseta, pantalón, pelo y armadura para poner encima.
 - **Deshacer y rehacer** en todas las operaciones.
 
@@ -42,6 +43,8 @@
 
 ### Vista 3D y poses
 - Poses: de pie, caminando, saludando, brazo arriba, agachado, corriendo, combate y neutra. La pose se guarda con la skin.
+- **Ajuste fino:** cada articulación se gira a mano con controles deslizantes.
+- **Animación** de ida y vuelta entre dos poses, o entre una pose y su espejo (para caminar o correr).
 - Fondo, iluminación, sombra en el suelo y velocidad de giro configurables.
 - **Captura** de la vista 3D a PNG con fondo transparente.
 

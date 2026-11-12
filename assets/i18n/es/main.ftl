@@ -274,3 +274,4 @@ import-fit-contain = Ajustar
 import-fit-cover = Rellenar
 import-whole = Usar la imagen entera
 error-image = No se pudo abrir la imagen. Se aceptan PNG y JPEG.
+about-version = Deepslate Studio { $version } · Licencia GPLv3
