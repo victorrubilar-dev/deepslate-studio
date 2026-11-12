@@ -1,6 +1,7 @@
 //! Ventana principal: menús, panel de herramientas, lienzo 2D y diálogos.
 
 mod settings_window;
+mod style;
 
 use crate::core::{
     FACES, Face, LAYERS, Layer, LoadError, Model, PARTS, Part, Skin, convert_model, rect,
@@ -17,6 +18,7 @@ use eframe::egui::{
 };
 use image::{Rgba, RgbaImage};
 use std::path::{Path, PathBuf};
+use style::ACCENT;
 
 #[derive(Clone, Copy)]
 enum After {
@@ -126,6 +128,7 @@ impl App {
             .as_deref()
             .map(Settings::load_from)
             .unwrap_or_default();
+        style::apply(&cc.egui_ctx);
         cc.egui_ctx.set_theme(theme_pref(settings.theme));
         let mut settings = settings;
         match settings.start_view {
@@ -1764,9 +1767,6 @@ fn part_name(i: &I18n, p: Part) -> String {
         Part::LeftLeg => i.tr("part-left-leg"),
     }
 }
-
-/// Color de acento para la parte seleccionada; el mismo que usa el shader 3D.
-const ACCENT: Color32 = Color32::from_rgb(51, 191, 179);
 
 fn pose_name(i: &I18n, p: Preset) -> String {
     match p {

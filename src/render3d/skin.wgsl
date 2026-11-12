@@ -38,7 +38,8 @@ fn vs(v: VIn) -> VOut {
 }
 
 fn shade(rgb: vec3<f32>, i: VOut) -> vec3<f32> {
-    let accent = vec3<f32>(0.20, 0.75, 0.70);
+    // Menta de ui/style.rs (64, 214, 180).
+    let accent = vec3<f32>(0.25, 0.84, 0.71);
     return mix(rgb * i.shade, accent, 0.3 * i.selected);
 }
 

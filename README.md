@@ -86,7 +86,7 @@ Las rutas exactas aparecen en **Ajustes → Avanzado**.
 
 ## Idiomas
 
-Español. Pronto: inglés, portugués y catalán.
+Español, inglés, portugués de Brasil y catalán. La app usa el idioma del sistema, y se puede cambiar en **Ajustes → General** sin reiniciar.
 
 ## Contribuir
 
@@ -101,5 +101,7 @@ La CI ejecuta lo mismo en Linux y en Windows. Las reglas del proyecto están en 
 ## Licencia
 
 [GPLv3](LICENSE).
+
+La fuente de los títulos es [Pixelify Sans](https://github.com/eifetx/Pixelify-Sans), con licencia [SIL Open Font License 1.1](assets/fonts/OFL.txt).
 
 Deepslate Studio es un proyecto independiente. No está afiliado a Mojang ni a Microsoft, ni cuenta con su aprobación.
