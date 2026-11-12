@@ -247,3 +247,11 @@ settings-library-default = Fes servir la predeterminada
 settings-card-size = Mida de les targetes
 settings-clear-cache = Neteja la memòria cau de miniatures
 status-cache-cleared = S'ha netejat la memòria cau de miniatures.
+
+file-new-base = Nova a partir de la plantilla base
+edit-apply-template = Aplica una plantilla
+template-color-note = La samarreta, els pantalons i els cabells fan servir el color principal.
+template-shirt = Samarreta
+template-pants = Pantalons
+template-hair = Cabells
+template-armor = Armadura

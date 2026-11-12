@@ -8,6 +8,7 @@ use crate::core::{
     FACES, Face, LAYERS, Layer, LoadError, Model, PARTS, Part, Skin, convert_model, rect,
 };
 use crate::editor::colors::{palette_from, parse_hex, to_hex};
+use crate::editor::templates::{self, Template};
 use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
 use crate::project::{self, Card, Project, ProjectError};
@@ -745,6 +746,19 @@ impl App {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button(self.i18n.tr("menu-file"), |ui| {
                 self.menu_item(ui, Action::New);
+                if ui.button(self.i18n.tr("file-new-base")).clicked() {
+                    let skin = Skin {
+                        pixels: templates::draw(Template::Base, Model::Steve, self.primary()),
+                        model: Model::Steve,
+                    };
+                    self.new_tab(
+                        Project {
+                            skin,
+                            ..blank_project()
+                        },
+                        None,
+                    );
+                }
                 self.menu_item(ui, Action::Open);
                 self.menu_item(ui, Action::CloseTab);
                 ui.separator();
@@ -763,6 +777,22 @@ impl App {
                 ui.separator();
                 self.menu_item(ui, Action::CopyParts);
                 self.menu_item(ui, Action::PasteParts);
+                ui.separator();
+                ui.menu_button(self.i18n.tr("edit-apply-template"), |ui| {
+                    ui.weak(self.i18n.tr("template-color-note"));
+                    for (t, name) in [
+                        (Template::Shirt, self.i18n.tr("template-shirt")),
+                        (Template::Pants, self.i18n.tr("template-pants")),
+                        (Template::Hair, self.i18n.tr("template-hair")),
+                        (Template::Armor, self.i18n.tr("template-armor")),
+                    ] {
+                        if ui.button(name).clicked() {
+                            let layer =
+                                templates::draw(t, self.editor.skin().model, self.primary());
+                            self.editor.apply_layer(&layer);
+                        }
+                    }
+                });
             });
             if ui.button(self.i18n.tr("menu-settings")).clicked() {
                 self.show_settings = true;

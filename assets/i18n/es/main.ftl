@@ -248,3 +248,11 @@ settings-library-default = Usar la predeterminada
 settings-card-size = Tamaño de tarjetas
 settings-clear-cache = Limpiar caché de miniaturas
 status-cache-cleared = Se borró la caché de miniaturas.
+
+file-new-base = Nueva desde plantilla base
+edit-apply-template = Aplicar plantilla
+template-color-note = Camiseta, pantalón y pelo usan el color principal.
+template-shirt = Camiseta
+template-pants = Pantalón
+template-hair = Pelo
+template-armor = Armadura

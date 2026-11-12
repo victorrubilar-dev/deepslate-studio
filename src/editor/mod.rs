@@ -2,6 +2,7 @@
 //! Cada paso de deshacer guarda la skin entera: son 16 KB y evita errores de diferencias.
 
 pub mod colors;
+pub mod templates;
 
 use crate::core::{
     FACES, LAYERS, Layer, PARTS, Part, Rect, Skin, TRANSPARENT, convert_model, face_at,
@@ -279,6 +280,17 @@ impl Editor {
 
     /// Pega las partes marcadas de `source`. Si el modelo es distinto se convierten los brazos.
     /// Pega aunque la capa esté oculta: es una elección explícita.
+    /// Pinta encima los píxeles no transparentes de `layer` (una plantilla), como un solo paso.
+    pub fn apply_layer(&mut self, layer: &RgbaImage) {
+        self.step(|e| {
+            for (x, y, p) in layer.enumerate_pixels() {
+                if p[3] > 0 {
+                    e.put(x, y, *p);
+                }
+            }
+        });
+    }
+
     pub fn paste_parts(&mut self, source: &Skin, mask: &PartMask) {
         let model = self.skin.model;
         let source = convert_model(source, model);
@@ -524,5 +536,21 @@ mod tests {
         assert_eq!(e.pick(9, 9), RED);
         assert_eq!(e.pick(21, 21), TRANSPARENT);
         assert_eq!(e.skin().model, Model::Alex);
+    }
+
+    #[test]
+    fn apply_layer_is_one_step_and_keeps_transparent() {
+        let mut skin = Skin::blank(Model::Steve);
+        skin.pixels.put_pixel(8, 8, Rgba([1, 2, 3, 255]));
+        let mut e = Editor::new(skin.clone(), 10);
+        let mut layer = RgbaImage::new(64, 64);
+        layer.put_pixel(20, 20, Rgba([9, 9, 9, 255]));
+        e.apply_layer(&layer);
+        assert_eq!(*e.skin().pixels.get_pixel(20, 20), Rgba([9, 9, 9, 255]));
+        assert_eq!(*e.skin().pixels.get_pixel(8, 8), Rgba([1, 2, 3, 255]));
+        assert!(e.can_undo());
+        e.undo();
+        assert_eq!(*e.skin(), skin);
+        assert!(!e.can_undo());
     }
 }

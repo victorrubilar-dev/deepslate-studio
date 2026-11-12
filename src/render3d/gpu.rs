@@ -491,7 +491,12 @@ mod tests {
             renderer: Arc::new(RwLock::new(renderer)),
         };
         let r = Renderer3d::new(&rs);
-        r.upload_skin(&test_skin().pixels);
+        // DEEPSLATE_RENDER_SKIN permite revisar una skin cualquiera en vez de la de prueba.
+        let skin = std::env::var("DEEPSLATE_RENDER_SKIN")
+            .ok()
+            .map(|p| image::open(p).expect("skin").into_rgba8())
+            .unwrap_or_else(|| test_skin().pixels);
+        r.upload_skin(&skin);
         // Capa: exterior roja con esquina negra, interior azul.
         let mut cape = RgbaImage::from_pixel(64, 32, image::Rgba([60, 90, 220, 255]));
         for (x, y, p) in cape.enumerate_pixels_mut() {

@@ -247,3 +247,11 @@ settings-library-default = Use the default
 settings-card-size = Card size
 settings-clear-cache = Clear thumbnail cache
 status-cache-cleared = Thumbnail cache cleared.
+
+file-new-base = New from base template
+edit-apply-template = Apply template
+template-color-note = Shirt, pants and hair use the primary color.
+template-shirt = Shirt
+template-pants = Pants
+template-hair = Hair
+template-armor = Armor
