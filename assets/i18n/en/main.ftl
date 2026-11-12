@@ -264,3 +264,12 @@ joint-title = Adjust pose
 joint-hint = Click a part in the 3D view to adjust its joint.
 joint-reset = Straighten
 joint-axes = X: forward and back. Y: turn. Z: sideways.
+
+edit-image-front = Image on the front…
+import-images = Images
+import-title = Image on the front
+import-note = Drag over the image to crop it. It is painted on the front of the head, body, arms and legs; you can undo it.
+import-fit-contain = Fit
+import-fit-cover = Fill
+import-whole = Use the whole image
+error-image = The image could not be opened. PNG and JPEG are supported.

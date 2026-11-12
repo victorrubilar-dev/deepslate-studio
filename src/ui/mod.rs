@@ -8,6 +8,7 @@ use crate::core::{
     FACES, Face, LAYERS, Layer, LoadError, Model, PARTS, Part, Skin, convert_model, rect,
 };
 use crate::editor::colors::{palette_from, parse_hex, to_hex};
+use crate::editor::image_import::{Fit, fit, to_front};
 use crate::editor::templates::{self, Template};
 use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
@@ -63,6 +64,7 @@ enum Dialog {
     CopyParts(PartMask),
     PasteParts(PartMask),
     EditCard(PathBuf, library_view::CardDraft),
+    ImportImage(Box<ImportState>),
     /// Ruta y nombre de la tarjeta.
     DeleteSkin(PathBuf, String),
 }
@@ -84,6 +86,126 @@ struct PreviewState {
     cape_color: [u8; 3],
     cape_img: Option<RgbaImage>,
     cape_rev: u64,
+}
+
+/// Diálogo de «Imagen al frente». El recorte está en píxeles de la imagen original.
+struct ImportState {
+    src: RgbaImage,
+    crop: (u32, u32, u32, u32),
+    fit: Fit,
+    layer: Layer,
+    drag_from: Option<(u32, u32)>,
+    /// Vista previa reducida de la imagen (una foto grande no entra como textura).
+    preview: Option<TextureHandle>,
+}
+
+impl ImportState {
+    fn new(src: RgbaImage) -> Self {
+        Self {
+            crop: (0, 0, src.width(), src.height()),
+            src,
+            fit: Fit::Contain,
+            layer: Layer::Base,
+            drag_from: None,
+            preview: None,
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, i: &I18n, model: Model) {
+        let ctx = ui.ctx().clone();
+        let src = &self.src;
+        let tex = self.preview.get_or_insert_with(|| {
+            let k = (512.0 / src.width().max(src.height()) as f32).min(1.0);
+            let small = image::imageops::thumbnail(
+                src,
+                ((src.width() as f32 * k) as u32).max(1),
+                ((src.height() as f32 * k) as u32).max(1),
+            );
+            ctx.load_texture(
+                "import-src",
+                ColorImage::from_rgba_unmultiplied(
+                    [small.width() as usize, small.height() as usize],
+                    small.as_raw(),
+                ),
+                TextureOptions::LINEAR,
+            )
+        });
+        ui.horizontal_top(|ui| {
+            // Imagen con el recorte; arrastrar marca uno nuevo.
+            let (w, h) = (self.src.width() as f32, self.src.height() as f32);
+            let k = (320.0 / w).min(320.0 / h);
+            let (area, resp) = ui.allocate_exact_size(Vec2::new(w * k, h * k), Sense::drag());
+            ui.painter().image(
+                tex.id(),
+                area,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            let to_img = |p: Pos2| {
+                let v = (p - area.min) / k;
+                (
+                    v.x.clamp(0.0, w - 1.0) as u32,
+                    v.y.clamp(0.0, h - 1.0) as u32,
+                )
+            };
+            if resp.drag_started() {
+                self.drag_from = resp.interact_pointer_pos().map(to_img);
+            }
+            if let (Some(a), Some(p)) = (self.drag_from, resp.interact_pointer_pos())
+                && resp.dragged()
+            {
+                let b = to_img(p);
+                self.crop = (
+                    a.0.min(b.0),
+                    a.1.min(b.1),
+                    a.0.abs_diff(b.0) + 1,
+                    a.1.abs_diff(b.1) + 1,
+                );
+            }
+            if resp.drag_stopped() {
+                self.drag_from = None;
+            }
+            let (x, y, cw, ch) = self.crop;
+            let crop = Rect::from_min_size(
+                area.min + Vec2::new(x as f32, y as f32) * k,
+                Vec2::new(cw as f32, ch as f32) * k,
+            );
+            ui.painter()
+                .rect_stroke(crop, 0.0, Stroke::new(2.0, ACCENT), StrokeKind::Outside);
+
+            // Resultado sobre la silueta frontal.
+            let canvas = fit(&self.src, self.crop, model, self.fit);
+            let result = ctx.load_texture(
+                "import-result",
+                ColorImage::from_rgba_unmultiplied(
+                    [canvas.width() as usize, canvas.height() as usize],
+                    canvas.as_raw(),
+                ),
+                TextureOptions::NEAREST,
+            );
+            let size = Vec2::new(canvas.width() as f32, canvas.height() as f32) * 8.0;
+            let (r, _) = ui.allocate_exact_size(size, Sense::hover());
+            ui.painter()
+                .rect_filled(r, 0.0, ui.visuals().extreme_bg_color);
+            ui.painter().image(
+                result.id(),
+                r,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.fit, Fit::Contain, i.tr("import-fit-contain"));
+            ui.radio_value(&mut self.fit, Fit::Cover, i.tr("import-fit-cover"));
+            ui.separator();
+            ui.radio_value(&mut self.layer, Layer::Base, i.tr("layer-base"));
+            ui.radio_value(&mut self.layer, Layer::Overlay, i.tr("layer-overlay"));
+            ui.separator();
+            if ui.button(i.tr("import-whole")).clicked() {
+                self.crop = (0, 0, self.src.width(), self.src.height());
+            }
+        });
+    }
 }
 
 /// Animación de la vista 3D: va y vuelve entre la pose de la skin y `target`.
@@ -794,6 +916,9 @@ impl App {
                 self.menu_item(ui, Action::CopyParts);
                 self.menu_item(ui, Action::PasteParts);
                 ui.separator();
+                if ui.button(self.i18n.tr("edit-image-front")).clicked() {
+                    self.import_image();
+                }
                 ui.menu_button(self.i18n.tr("edit-apply-template"), |ui| {
                     ui.weak(self.i18n.tr("template-color-note"));
                     for (t, name) in [
@@ -1716,6 +1841,26 @@ impl App {
         self.settings_changed = true;
     }
 
+    fn import_image(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter(self.i18n.tr("import-images"), &["png", "jpg", "jpeg"])
+            .pick_file()
+        else {
+            return;
+        };
+        match image::open(&path) {
+            Ok(img) => {
+                self.dialog = Some(Dialog::ImportImage(Box::new(ImportState::new(
+                    img.into_rgba8(),
+                ))))
+            }
+            Err(e) => {
+                log::warn!("imagen {}: {e}", path.display());
+                self.error(self.i18n.tr("error-image"));
+            }
+        }
+    }
+
     fn sync_mirror(&mut self) {
         self.editor.set_mirror(match self.mirror {
             MirrorMode::Off => Mirror::Off,
@@ -1972,6 +2117,18 @@ impl App {
                     ],
                 )
             }
+            Dialog::ImportImage(state) => {
+                ui.heading(i.tr("import-title"));
+                ui.label(i.tr("import-note"));
+                state.ui(ui, i, self.editor.skin().model);
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("convert-apply")),
+                        (Choice::Cancel, i.tr("cancel")),
+                    ],
+                )
+            }
             Dialog::DeleteSkin(_, name) => {
                 ui.label(library_view::delete_question(i, name));
                 buttons(
@@ -2021,6 +2178,11 @@ impl App {
             }
             (Dialog::EditCard(path, draft), Choice::Accept) => self.save_card_draft(&path, &draft),
             (Dialog::DeleteSkin(path, _), Choice::Accept) => self.delete_skin(&path),
+            (Dialog::ImportImage(st), Choice::Accept) => {
+                let model = self.editor.skin().model;
+                let canvas = fit(&st.src, st.crop, model, st.fit);
+                self.editor.apply_layer(&to_front(&canvas, model, st.layer));
+            }
             _ => {}
         }
     }

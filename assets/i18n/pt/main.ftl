@@ -264,3 +264,12 @@ joint-title = Ajustar pose
 joint-hint = Clique em uma parte na visão 3D para ajustar a articulação.
 joint-reset = Endireitar
 joint-axes = X: para frente e para trás. Y: girar. Z: para os lados.
+
+edit-image-front = Imagem na frente…
+import-images = Imagens
+import-title = Imagem na frente
+import-note = Arraste sobre a imagem para recortar. Ela é pintada na frente da cabeça, tronco, braços e pernas; você pode desfazer.
+import-fit-contain = Ajustar
+import-fit-cover = Preencher
+import-whole = Usar a imagem inteira
+error-image = Não foi possível abrir a imagem. São aceitos PNG e JPEG.

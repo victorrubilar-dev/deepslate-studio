@@ -264,3 +264,12 @@ joint-title = Ajusta la postura
 joint-hint = Fes clic en una part a la vista 3D per ajustar-ne l'articulació.
 joint-reset = Redreça
 joint-axes = X: endavant i enrere. Y: girar. Z: cap als costats.
+
+edit-image-front = Imatge al davant…
+import-images = Imatges
+import-title = Imatge al davant
+import-note = Arrossega sobre la imatge per retallar-la. Es pinta al davant del cap, el tors, els braços i les cames; ho pots desfer.
+import-fit-contain = Ajusta
+import-fit-cover = Omple
+import-whole = Fes servir la imatge sencera
+error-image = No s'ha pogut obrir la imatge. S'accepten PNG i JPEG.

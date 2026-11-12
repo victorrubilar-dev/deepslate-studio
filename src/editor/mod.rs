@@ -2,6 +2,7 @@
 //! Cada paso de deshacer guarda la skin entera: son 16 KB y evita errores de diferencias.
 
 pub mod colors;
+pub mod image_import;
 pub mod templates;
 
 use crate::core::{
