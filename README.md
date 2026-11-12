@@ -10,12 +10,23 @@
 
 ## Funciones
 
+### Biblioteca
+- **Tarjetas** con el personaje en su pose, un fondo, el modelo, la fecha de la última edición y una estrella de favorita.
+- **Seis fondos** dibujados para la app, o un fondo propio desde cualquier PNG.
+- **Búsqueda** por nombre o etiqueta, y filtro de favoritas.
+- **Desde cada tarjeta:** abrir, editar, duplicar o eliminar.
+- Los datos de la tarjeta van dentro del PNG: si mueves o compartes el archivo, se van con él.
+
+### Pestañas
+- Varias skins abiertas a la vez, cada una con su propio deshacer, su archivo y su cámara.
+
 ### Edición
 - **Lienzo 2D:** la textura desplegada, editable píxel a píxel, con cuadrícula opcional y el nombre de cada parte.
 - **Pintar en 3D:** el lápiz, el borrador, el bote y el cuentagotas también funcionan sobre el personaje en 3D, con el píxel bajo el cursor resaltado. Se gira con el botón derecho y se acerca con la rueda.
 - **Herramientas:** lápiz, borrador, bote de pintura, cuentagotas, degradado, sello y selección rectangular.
 - **Espejo:** lo que pintas en un brazo o una pierna se copia al lado opuesto. Funciona para todo el cuerpo o solo para la parte elegida.
 - **Capas:** capa base y capa exterior. Cada parte y cada capa se puede mostrar u ocultar por separado.
+- **Plantillas:** una base para empezar, más camiseta, pantalón, pelo y armadura para poner encima.
 - **Deshacer y rehacer** en todas las operaciones.
 
 ### Colores

@@ -44,15 +44,19 @@ Rust estable, edición 2024, versión mínima 1.95.
 src/
   main.rs      arranque: registro, ícono, ventana
   core/        modelo de skin: partes, capas, Steve/Alex, conversión 64×32 → 64×64
-  editor/      herramientas, deshacer/rehacer, selección, espejo, colores
+  editor/      herramientas, deshacer/rehacer, selección, espejo, colores, plantillas
   project/     formato de proyecto: guardar y abrir
   render3d/    geometría del personaje, poses, dibujo con wgpu (shader en skin.wgsl)
+  library/     lectura de la carpeta de la biblioteca, búsqueda, fondos de tarjeta
   settings/    ajustes, atajos y registro
   i18n/        carga de traducciones
-  ui/          ventana, paneles, diálogos y ventana de ajustes
+  ui/          ventana, pestañas, paneles, diálogos, biblioteca (library_view.rs),
+               ajustes (settings_window.rs) y estilo visual (style.rs)
 assets/
   i18n/<idioma>/main.ftl   textos de la interfaz (es, en, pt, ca)
+  fonts/                   fuente pixel de los títulos (SIL OFL, con su licencia)
   icon.png                 ícono de la app
+  deepslate-studio.desktop entrada de menú para Linux
 ```
 
 Las dependencias entre módulos van en un solo sentido: `ui` usa todo lo demás; `editor` y `project` usan `core` y el tipo `Pose` de `render3d`; `core` no depende de ningún otro módulo. La lógica va en `core` y `editor`, que se pueden probar sin ventana. `ui` solo dibuja y llama a esas funciones.
@@ -63,8 +67,10 @@ Las dependencias entre módulos van en un solo sentido: `ui` usa todo lo demás;
 - **Skins antiguas de 64×32:** al abrirlas se convierten a 64×64. El brazo y la pierna derechos se copian espejados al lado izquierdo.
 - **Deshacer:** el `Editor` guarda copias completas de la skin. Cada operación que cambia píxeles pasa por `Editor::step`, que registra un paso solo si algo cambió. Los trazos de lápiz usan `begin_stroke` / `end_stroke` para que un trazo entero sea un solo paso.
 - **Espejo:** `mirror_pixel` lleva un píxel al lugar equivalente en la parte opuesta (izquierda ↔ derecha). Aplicarlo dos veces devuelve el píxel original.
-- **Formato de proyecto:** un PNG de skin normal con los datos extra (versión, modelo y pose) en un bloque iTXt. Cualquier visor lo abre como imagen. Un PNG sin ese bloque se importa como skin nueva. Si el archivo trae una versión más nueva que la de la app, se rechaza con un aviso, no se lee a medias.
+- **Formato de proyecto:** un PNG de skin normal con los datos extra (versión, modelo, pose y tarjeta de biblioteca) en un bloque iTXt. Cualquier visor lo abre como imagen. Un PNG sin ese bloque se importa como skin nueva. Si el archivo trae una versión más nueva que la de la app, se rechaza con un aviso, no se lee a medias.
 - **Ajustes:** `settings.ron` en el directorio de configuración del sistema. Si el archivo está dañado, se guarda como `.ron.bak` y se usan los valores por defecto.
+- **Pestañas:** la pestaña activa vive en los campos de `App` (`editor`, `path`, `camera`, `selected`, `card`); las demás, en `tabs`. `switch_tab` las intercambia. Todo lo que es propio de una skin abierta va en `Doc` y en `swap_active`.
+- **Biblioteca:** cada PNG de la carpeta es una tarjeta. Las miniaturas se dibujan con la vista 3D y se guardan en la caché del sistema, con la huella del archivo como nombre.
 - **Textos:** `I18n::tr("clave")` y `I18n::tr_args("clave", &[...])`. Si falta una clave, la interfaz muestra la clave misma. La prueba `every_used_key_exists` busca en el código las claves usadas y falla si alguna no está en `es/main.ftl`.
 
 ## Reglas
