@@ -131,10 +131,13 @@ impl App {
         if cc.wgpu_render_state.is_none() {
             log::warn!("sin wgpu: la vista 3D no estará disponible");
         }
-        let last = settings
-            .open_last
-            .then(|| settings.last_file.clone())
-            .flatten();
+        // Un archivo pasado al abrir (desde «Abrir con» o la terminal) gana sobre la última skin.
+        let last = std::env::args_os().nth(1).map(PathBuf::from).or_else(|| {
+            settings
+                .open_last
+                .then(|| settings.last_file.clone())
+                .flatten()
+        });
         let start_tool = settings.start_tool;
         let mut app = Self {
             i18n: I18n::spanish(),

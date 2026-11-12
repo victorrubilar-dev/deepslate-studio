@@ -1,0 +1,68 @@
+name: Release
+
+# Se publica al subir un tag como v0.1.0. El tag tiene que coincidir con la versión de Cargo.toml.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Revisar que el tag coincide con la versión
+        run: test "${GITHUB_REF_NAME#v}" = "$(cargo pkgid | sed 's/.*[#@]//')"
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: Empaquetar
+        run: |
+          dir="deepslate-studio-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir "$dir"
+          cp README.md LICENSE "$dir/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp target/release/deepslate-studio.exe "$dir/"
+            7z a "$dir.zip" "$dir"
+          else
+            cp target/release/deepslate-studio "$dir/"
+            cp assets/icon.png "$dir/deepslate-studio.png"
+            cp assets/deepslate-studio.desktop "$dir/"
+            tar czf "$dir.tar.gz" "$dir"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            deepslate-studio-*.zip
+            deepslate-studio-*.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Crear el release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Las versiones 0.x salen marcadas como prerelease.
+        run: |
+          pre=""
+          case "$GITHUB_REF_NAME" in v0.*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" deepslate-studio-* \
+            --repo "$GITHUB_REPOSITORY" --title "Deepslate Studio ${GITHUB_REF_NAME}" \
+            --generate-notes $pre

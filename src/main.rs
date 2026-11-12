@@ -9,6 +9,18 @@ mod render3d;
 mod settings;
 mod ui;
 
+fn icon() -> eframe::egui::IconData {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .expect("el ícono embebido es un PNG válido")
+        .into_rgba8();
+    let (width, height) = img.dimensions();
+    eframe::egui::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    }
+}
+
 fn main() -> eframe::Result {
     if let Some(p) = settings::log::path() {
         settings::log::init(&p);
@@ -17,7 +29,10 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Deepslate Studio")
-            .with_inner_size([1100.0, 760.0]),
+            // Debe coincidir con el nombre del archivo .desktop para que Wayland muestre el ícono.
+            .with_app_id("deepslate-studio")
+            .with_inner_size([1100.0, 760.0])
+            .with_icon(icon()),
         ..Default::default()
     };
     eframe::run_native(

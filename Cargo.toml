@@ -18,3 +18,7 @@ rfd = "0.18"
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
 unic-langid = "0.9"
+
+[profile.release]
+strip = true
+lto = "thin"

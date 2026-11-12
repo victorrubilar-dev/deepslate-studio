@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Deepslate Studio
+Comment=Editor de skins
+Comment[en]=Skin editor
+Comment[pt]=Editor de skins
+Comment[ca]=Editor de skins
+Exec=deepslate-studio %f
+Icon=deepslate-studio
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;
+MimeType=image/png;
+StartupWMClass=deepslate-studio
