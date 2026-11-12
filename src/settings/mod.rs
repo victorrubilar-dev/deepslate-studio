@@ -210,7 +210,7 @@ impl Default for Settings {
             show_grid: true,
             show_labels: true,
             undo_levels: 100,
-            view: View::Flat,
+            view: View::ThreeD,
             shortcuts: BTreeMap::new(),
             recent_colors: Vec::new(),
             palette: Vec::new(),

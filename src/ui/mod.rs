@@ -252,7 +252,9 @@ pub struct App {
     color: Hsva,
     texture: Option<TextureHandle>,
     texture_rev: Option<u64>,
-    preview: Option<TextureHandle>,
+    /// Diálogo de conversión: el personaje en 3D antes y después, y cuál se muestra.
+    convert_views: Option<[TextureHandle; 2]>,
+    convert_after: bool,
     painting: bool,
     last_px: Option<(u32, u32)>,
     /// Trazo en la vista 3D: último píxel pintado, última posición del cursor y la skin
@@ -338,7 +340,8 @@ impl App {
             color: Hsva::from_srgba_unmultiplied([196, 92, 52, 255]),
             texture: None,
             texture_rev: None,
-            preview: None,
+            convert_views: None,
+            convert_after: true,
             painting: false,
             last_px: None,
             last_hit: None,
@@ -382,7 +385,7 @@ impl App {
             && app.settings.view == View::Library
         {
             // Abrir un archivo desde el explorador lleva directo al editor.
-            app.settings.view = View::Flat;
+            app.settings.view = View::ThreeD;
         }
         app
     }
@@ -1336,7 +1339,8 @@ impl App {
             .button(i.tr_args("model-convert", &[("model", format!("{other:?}").into())]))
             .clicked()
         {
-            self.preview = None;
+            self.convert_views = None;
+            self.convert_after = true;
             self.dialog = Some(Dialog::Convert(convert_model(self.editor.skin(), other)));
         }
         ui.separator();
@@ -1404,8 +1408,8 @@ impl App {
             let i = &self.i18n;
             for (view, icon, key) in [
                 (View::Library, Icon::Library, "view-library"),
-                (View::Flat, Icon::Flat, "view-2d"),
                 (View::ThreeD, Icon::Cube, "view-3d"),
+                (View::Flat, Icon::Flat, "view-2d"),
                 (View::Preview, Icon::Preview, "view-preview"),
             ] {
                 let on = self.settings.view == view;
@@ -1546,6 +1550,52 @@ impl App {
         if load_cape {
             self.load_preview_cape();
         }
+    }
+
+    /// El personaje actual y `after`, de tres cuartos y de pie, para comparar en un diálogo.
+    /// Sin vista 3D se muestran las texturas planas.
+    fn model_views(&mut self, ctx: &egui::Context, after: &Skin) -> [TextureHandle; 2] {
+        let camera = Camera::thumbnail();
+        let pose = Pose::default();
+        let lighting = self.settings.lighting;
+        let renderer = self.renderer.as_ref();
+        let shot = |skin: &Skin, name: &str| {
+            let img = renderer.and_then(|r| {
+                r.upload_skin(&skin.pixels);
+                r.capture(
+                    320,
+                    &Scene {
+                        model: skin.model,
+                        pose: &pose,
+                        camera: &camera,
+                        selected: None,
+                        visible: &|_, _| true,
+                        cape: false,
+                        lighting,
+                    },
+                )
+            });
+            match img {
+                Some(img) => ctx.load_texture(
+                    name,
+                    ColorImage::from_rgba_unmultiplied(
+                        [img.width() as usize, img.height() as usize],
+                        img.as_raw(),
+                    ),
+                    TextureOptions::LINEAR,
+                ),
+                None => {
+                    ctx.load_texture(name, skin_image(skin, |_, _| true), TextureOptions::NEAREST)
+                }
+            }
+        };
+        let views = [
+            shot(self.editor.skin(), "convert-before"),
+            shot(after, "convert-after"),
+        ];
+        // La skin en la GPU cambió: la vista 3D tiene que volver a subirla.
+        self.uploaded = None;
+        views
     }
 
     fn read_png(&mut self) -> Option<(PathBuf, Vec<u8>)> {
@@ -2146,6 +2196,11 @@ impl App {
         let Some(dialog) = self.dialog.take() else {
             return;
         };
+        if let Dialog::Convert(skin) = &dialog
+            && self.convert_views.is_none()
+        {
+            self.convert_views = Some(self.model_views(ctx, skin));
+        }
         let i = &self.i18n;
         let buttons = |ui: &mut egui::Ui, labels: &[(Choice, String)]| {
             let mut picked = None;
@@ -2179,27 +2234,19 @@ impl App {
                     &[("model", format!("{:?}", skin.model).into())],
                 ));
                 ui.label(i.tr("convert-note"));
-                let preview = self.preview.get_or_insert_with(|| {
-                    ctx.load_texture(
-                        "preview",
-                        skin_image(skin, |_, _| true),
-                        TextureOptions::NEAREST,
-                    )
-                });
-                let before = self.texture.as_ref().map(|t| t.id());
+                // Un solo personaje; el selector cambia entre antes y después en el mismo lugar.
                 ui.horizontal(|ui| {
-                    for (label, tex) in [
-                        (i.tr("convert-before"), before),
-                        (i.tr("convert-after"), Some(preview.id())),
-                    ] {
-                        ui.vertical(|ui| {
-                            ui.label(label);
-                            if let Some(tex) = tex {
-                                ui.image((tex, Vec2::splat(256.0)));
-                            }
-                        });
-                    }
+                    ui.selectable_value(&mut self.convert_after, false, i.tr("convert-before"));
+                    ui.selectable_value(&mut self.convert_after, true, i.tr("convert-after"));
                 });
+                if let Some(views) = &self.convert_views {
+                    ui.vertical_centered(|ui| {
+                        ui.image((
+                            views[usize::from(self.convert_after)].id(),
+                            Vec2::splat(300.0),
+                        ));
+                    });
+                }
                 buttons(
                     ui,
                     &[

@@ -48,7 +48,7 @@ impl Default for LibraryState {
             thumbs: HashMap::new(),
             presets: Vec::new(),
             custom: HashMap::new(),
-            return_view: View::Flat,
+            return_view: View::ThreeD,
             shown_at: 0.0,
         }
     }
