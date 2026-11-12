@@ -1,5 +1,5 @@
-//! Estilo visual propio: esquinas rectas y sombras duras (aspecto de bloque), tonos pizarra
-//! y el menta del ícono como acento. Los títulos usan una fuente pixel.
+//! Estilo visual propio: esquinas rectas y sombras duras (aspecto de bloque), tonos grafito
+//! como los ladrillos del ícono y un plateado frío como acento. Los títulos usan una fuente pixel.
 
 use super::icons::{self, Icon};
 use eframe::egui::{
@@ -8,12 +8,13 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
-/// Menta del ícono. `render3d/skin.wgsl` usa el mismo para la parte seleccionada.
-pub const ACCENT: Color32 = Color32::from_rgb(64, 214, 180);
-/// Versión más oscura para el tema claro, legible con texto blanco encima.
-const ACCENT_DARK: Color32 = Color32::from_rgb(26, 125, 103);
+/// Plateado frío, como el brillo de los ladrillos. `render3d/skin.wgsl` usa el mismo para la
+/// parte seleccionada.
+pub const ACCENT: Color32 = Color32::from_rgb(184, 196, 214);
+/// Pizarra oscura para el tema claro, legible con texto blanco encima.
+const ACCENT_DARK: Color32 = Color32::from_rgb(64, 74, 92);
 /// Texto sobre el acento en el tema oscuro.
-const ON_ACCENT: Color32 = Color32::from_rgb(15, 26, 23);
+const ON_ACCENT: Color32 = Color32::from_rgb(20, 19, 24);
 const PIXEL: &str = "pixel";
 
 /// Escala de tamaños de texto. Todo texto destacado usa uno de estos.
@@ -77,26 +78,26 @@ pub fn apply(ctx: &egui::Context) {
 
     ctx.style_mut_of(Theme::Dark, |s| {
         let v = &mut s.visuals;
-        let edge = Color32::from_rgb(14, 16, 20);
-        v.panel_fill = Color32::from_rgb(28, 31, 38);
-        v.window_fill = Color32::from_rgb(34, 38, 47);
-        v.faint_bg_color = Color32::from_rgb(35, 39, 48);
-        v.extreme_bg_color = Color32::from_rgb(19, 21, 26);
+        let edge = Color32::from_rgb(10, 9, 12);
+        v.panel_fill = Color32::from_rgb(26, 25, 30);
+        v.window_fill = Color32::from_rgb(33, 32, 38);
+        v.faint_bg_color = Color32::from_rgb(31, 30, 36);
+        v.extreme_bg_color = Color32::from_rgb(16, 15, 19);
         v.window_stroke = Stroke::new(1.0, edge);
         v.hyperlink_color = ACCENT;
-        // Texto secundario con contraste 4.5:1 sobre el panel.
-        v.weak_text_color = Some(Color32::from_rgb(148, 155, 168));
+        // Texto secundario con contraste 4.5:1 sobre paneles y botones.
+        v.weak_text_color = Some(Color32::from_rgb(158, 159, 168));
         v.selection.bg_fill = ACCENT;
         v.selection.stroke = Stroke::new(1.0, ON_ACCENT);
         let w = &mut v.widgets;
         w.noninteractive.bg_fill = v.panel_fill;
-        w.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(46, 51, 61));
-        w.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(201, 206, 216));
+        w.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(44, 43, 50));
+        w.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(208, 210, 216));
         for (wv, fill) in [
-            (&mut w.inactive, Color32::from_rgb(45, 50, 61)),
-            (&mut w.open, Color32::from_rgb(45, 50, 61)),
-            (&mut w.hovered, Color32::from_rgb(56, 62, 75)),
-            (&mut w.active, Color32::from_rgb(67, 74, 89)),
+            (&mut w.inactive, Color32::from_rgb(42, 41, 48)),
+            (&mut w.open, Color32::from_rgb(42, 41, 48)),
+            (&mut w.hovered, Color32::from_rgb(52, 51, 59)),
+            (&mut w.active, Color32::from_rgb(63, 62, 72)),
         ] {
             wv.bg_fill = fill;
             wv.weak_bg_fill = fill;
@@ -108,13 +109,27 @@ pub fn apply(ctx: &egui::Context) {
 
     ctx.style_mut_of(Theme::Light, |s| {
         let v = &mut s.visuals;
+        v.panel_fill = Color32::from_rgb(236, 236, 240);
+        v.window_fill = Color32::from_rgb(246, 246, 248);
+        v.faint_bg_color = Color32::from_rgb(228, 228, 233);
+        v.extreme_bg_color = Color32::from_rgb(252, 252, 253);
         v.hyperlink_color = ACCENT_DARK;
+        v.weak_text_color = Some(Color32::from_rgb(92, 94, 104));
         v.selection.bg_fill = ACCENT_DARK;
         v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
         let w = &mut v.widgets;
-        let edge = Stroke::new(1.0, Color32::from_rgb(169, 175, 186));
-        w.inactive.bg_stroke = edge;
-        w.open.bg_stroke = edge;
+        w.noninteractive.bg_fill = v.panel_fill;
+        let edge = Stroke::new(1.0, Color32::from_rgb(170, 172, 182));
+        for (wv, fill) in [
+            (&mut w.inactive, Color32::from_rgb(222, 222, 228)),
+            (&mut w.open, Color32::from_rgb(222, 222, 228)),
+            (&mut w.hovered, Color32::from_rgb(210, 211, 218)),
+            (&mut w.active, Color32::from_rgb(198, 199, 208)),
+        ] {
+            wv.bg_fill = fill;
+            wv.weak_bg_fill = fill;
+            wv.bg_stroke = edge;
+        }
         w.hovered.bg_stroke = Stroke::new(1.0, ACCENT_DARK);
         w.active.bg_stroke = Stroke::new(1.0, ACCENT_DARK);
     });
