@@ -1,66 +1,99 @@
 # CLAUDE.md
 
-Instrucciones para Claude Code en este repositorio.
+Guía para trabajar en este repositorio: qué es el proyecto, cómo está organizado y qué reglas seguir.
 
-## Proyecto
+## Qué es
 
-Editor de skins de Minecraft de escritorio, hecho en Rust.
-Nombre: Deepslate Studio (nombre del crate y del binario: `deepslate-studio`).
+Deepslate Studio es un editor de skins de escritorio para un juego de bloques, hecho en Rust. Nombre del crate y del binario: `deepslate-studio`.
 
-- Licencia: GPLv3. Todo código nuevo debe ser compatible con GPLv3.
-- Plataformas objetivo: Linux (principal) y Windows.
-- Idiomas de la interfaz: español (base), inglés, portugués y catalán.
-- Interfaz: egui. Vista 3D con wgpu.
+- **Licencia:** GPLv3. Todo código y todo recurso que entre debe ser compatible con GPLv3.
+- **Plataformas:** Linux (la principal) y Windows. Las dos tienen que compilar y pasar las pruebas.
+- **Idiomas:** español (base), inglés, portugués y catalán.
+- **Objetivo:** editor rápido, sin cuenta ni publicidad, con identidad visual propia.
 
-Ver `SPEC.md` para el alcance completo, los hitos y las decisiones.
+## Comandos
+
+```sh
+cargo run                                   # abrir la app
+cargo test                                  # pruebas
+cargo test -- --ignored                     # también las que necesitan GPU
+cargo clippy --all-targets -- -D warnings   # sin avisos
+cargo fmt --check
+```
+
+La CI (`.github/workflows/ci.yml`) ejecuta `fmt`, `clippy` y `test` en Linux y en Windows. Un cambio está terminado cuando pasa los tres.
 
 ## Stack
 
-- Rust estable, edición 2024, mínimo 1.95.
-- `eframe` / `egui` para la interfaz.
-- `wgpu` para la vista 3D.
-- `image` para PNG.
-- `serde` con RON o TOML para ajustes y formato de proyecto.
-- `fluent-bundle` para traducciones.
+| Uso | Librería |
+|---|---|
+| Interfaz | `eframe` / `egui` |
+| Vista 3D | `wgpu` (a través de eframe) |
+| PNG | `image` y `png` (este último para los bloques de texto del PNG) |
+| Ajustes | `serde` con RON |
+| Traducciones | `fluent-bundle` |
+| Diálogos de archivo | `rfd` |
+| Rutas de datos | `directories` |
+| Registro | `log` |
 
-## Estructura prevista
+Rust estable, edición 2024, versión mínima 1.95.
+
+## Estructura
 
 ```
 src/
-  core/        modelo de skin, capas, conversión Steve/Alex, conversión 64x32 -> 64x64
-  editor/      herramientas, pila de deshacer/rehacer, selección, espejo
-  render3d/    modelo 3D, poses (ángulos por articulación), miniaturas
-  library/     biblioteca de tarjetas, caché de miniaturas
-  project/     formato de proyecto propio, guardado y carga
-  settings/    ajustes, atajos
+  main.rs      arranque: registro, ícono, ventana
+  core/        modelo de skin: partes, capas, Steve/Alex, conversión 64×32 → 64×64
+  editor/      herramientas, deshacer/rehacer, selección, espejo, colores
+  project/     formato de proyecto: guardar y abrir
+  render3d/    geometría del personaje, poses, dibujo con wgpu (shader en skin.wgsl)
+  settings/    ajustes, atajos y registro
   i18n/        carga de traducciones
-  ui/          paneles, pestañas, tarjetas
+  ui/          ventana, paneles, diálogos y ventana de ajustes
 assets/
-  i18n/        es, en, pt, ca
-  backgrounds/ fondos predefinidos (originales, no copiados de Minecraft)
-tests/
+  i18n/<idioma>/main.ftl   textos de la interfaz
+  icon.png                 ícono de la app
 ```
 
-## Reglas de trabajo
+Las dependencias entre módulos van en un solo sentido: `ui` usa todo lo demás; `editor` y `project` usan `core` y el tipo `Pose` de `render3d`; `core` no depende de ningún otro módulo. La lógica va en `core` y `editor`, que se pueden probar sin ventana. `ui` solo dibuja y llama a esas funciones.
 
-- **Nada de texto fijo en la interfaz.** Todo texto visible sale de `assets/i18n/`. Si agregas un texto, agrega la clave en los cuatro idiomas (o marca como pendiente la traducción faltante, nunca dejarla vacía).
-- **Español es el idioma base.** Si falta una traducción, el fallback es español.
-- **No usar "Minecraft" ni logos o marcas de terceros** en la interfaz, el nombre de la app ni los fondos. Los fondos predefinidos se dibujan desde cero.
-- **Sin texturas de terceros en el repositorio.** No incluir capas oficiales de Minecraft ni skins de otras personas en `assets/`, en pruebas ni en instaladores. El usuario las carga localmente para previsualizar, y la app no las guarda ni las redistribuye.
-- **Formato 64×64 es el estándar.** Cualquier cambio que afecte el modelo de skin o el formato de proyecto debe preguntarse antes.
-- **Compatibilidad:** la conversión de 64×32 a 64×64 debe tener pruebas unitarias. No cambiar esa lógica sin tests que la respalden.
-- **Deshacer:** toda operación que modifique la skin debe registrarse en la pila de comandos. No modificar píxeles directamente desde la interfaz.
-- **Sin dependencias nuevas sin preguntar,** salvo que sea necesario para el hito en curso y se justifique en el commit.
-- **Windows y Linux:** no usar rutas con `/` fijas ni comandos específicos de un sistema. Usar `std::path` y directorios de datos estándar.
+## Conceptos clave
+
+- **Skin:** textura RGBA de 64×64 más su modelo (Steve, brazos de 4 px, o Alex, de 3 px). Tiene seis partes: cabeza, torso, dos brazos y dos piernas. Cada parte tiene capa base y capa exterior. `core/layout.rs` sabe dónde cae cada cara de cada parte en la textura.
+- **Skins antiguas de 64×32:** al abrirlas se convierten a 64×64. El brazo y la pierna derechos se copian espejados al lado izquierdo.
+- **Deshacer:** el `Editor` guarda copias completas de la skin. Cada operación que cambia píxeles pasa por `Editor::step`, que registra un paso solo si algo cambió. Los trazos de lápiz usan `begin_stroke` / `end_stroke` para que un trazo entero sea un solo paso.
+- **Espejo:** `mirror_pixel` lleva un píxel al lugar equivalente en la parte opuesta (izquierda ↔ derecha). Aplicarlo dos veces devuelve el píxel original.
+- **Formato de proyecto:** un PNG de skin normal con los datos extra (versión, modelo y pose) en un bloque iTXt. Cualquier visor lo abre como imagen. Un PNG sin ese bloque se importa como skin nueva. Si el archivo trae una versión más nueva que la de la app, se rechaza con un aviso, no se lee a medias.
+- **Ajustes:** `settings.ron` en el directorio de configuración del sistema. Si el archivo está dañado, se guarda como `.ron.bak` y se usan los valores por defecto.
+- **Textos:** `I18n::tr("clave")` y `I18n::tr_args("clave", &[...])`. Si falta una clave, la interfaz muestra la clave misma. La prueba `every_used_key_exists` busca en el código las claves usadas y falla si alguna no está en `es/main.ftl`.
+
+## Reglas
+
+**Textos**
+- Ningún texto visible queda fijo en el código: todo sale de `assets/i18n/`.
+- Al agregar una clave, agrégala en todos los idiomas que existan. Si no tienes la traducción, marca la línea como pendiente, pero nunca la dejes vacía. Si falta un texto, se muestra en español.
+- Pasa las claves literales a `tr("…")`, no las armes en tiempo de ejecución: si no, la prueba de claves no las encuentra.
+
+**Marcas y recursos de terceros**
+- No usar el nombre del juego ni logos o marcas de terceros en la interfaz, el nombre de la app ni los fondos.
+- No incluir texturas, capas oficiales ni skins de otras personas en `assets/`, en las pruebas ni en los instaladores. El usuario puede cargarlas para la vista previa, pero la app no las guarda ni las redistribuye. Las pruebas generan sus propias imágenes.
+- Los fondos y los íconos se dibujan desde cero.
+
+**Datos del usuario**
+- 64×64 es el formato estándar. Cualquier cambio en el modelo de skin o en el formato de proyecto se consulta antes, porque puede romper archivos ya guardados.
+- Si cambia el formato de proyecto: sube `project::VERSION`, sigue leyendo las versiones anteriores y agrega pruebas que lo demuestren.
+- La conversión de 64×32 a 64×64 está cubierta por pruebas. No se cambia sin pruebas que respalden el cambio.
+- Toda operación que modifica la skin pasa por el `Editor` y queda en la pila de deshacer. La interfaz nunca escribe píxeles directamente.
+
+**Código**
+- Nada de dependencias nuevas sin preguntar. Si una es necesaria, justifícala en el commit.
+- Código multiplataforma: rutas con `std::path` y directorios de datos con `directories`. Nada de `/` fijas ni de comandos propios de un sistema.
+- Las pruebas de `core/`, `editor/` y `project/` van primero. La interfaz se prueba a mano.
+- Los comentarios del código van en español y los identificadores en inglés, igual que el código existente.
 
 ## Cómo trabajar
 
-- Antes de implementar algo grande, proponer el plan y esperar confirmación.
-- Trabajar por hitos, según `SPEC.md`. No adelantar funciones de hitos posteriores.
-- Escribir pruebas para `core/` y `project/` antes que para la interfaz.
-- Mensajes de commit en español, en tiempo presente, cortos y descriptivos.
-
-## Decisiones tomadas
-
-- Versión mínima de Rust: 1.95 (edición 2024).
-- Traducciones: `fluent-bundle`, archivos en `assets/i18n/<idioma>/main.ftl`.
+- **Por hitos.** El alcance y el orden de los hitos están en `SPEC.md`. No adelantes funciones de un hito posterior.
+- **Plan antes que código.** Antes de un cambio grande (un módulo nuevo, un cambio de formato o una dependencia), propón el plan y espera confirmación.
+- **Commits** en español, en tiempo presente, cortos y descriptivos. Por ejemplo: «Agrega espejo por parte».
+- **Ramas:** el trabajo de cada hito va en su propia rama y se une a `master` cuando el usuario lo aprueba.
