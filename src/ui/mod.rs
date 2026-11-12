@@ -144,8 +144,9 @@ impl App {
                 .flatten()
         });
         let start_tool = settings.start_tool;
+        let lang = settings.resolved_language();
         let mut app = Self {
-            i18n: I18n::spanish(),
+            i18n: I18n::new(lang),
             editor: Editor::new(Skin::blank(Model::Steve), settings.undo_levels),
             settings,
             settings_path,
@@ -1642,6 +1643,11 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // El idioma se cambia en caliente desde Ajustes.
+        let lang = self.settings.resolved_language();
+        if lang != self.i18n.lang() {
+            self.i18n = I18n::new(lang);
+        }
         self.handle_close(&ctx);
         self.shortcuts(&ctx);
         self.autosave(&ctx);

@@ -140,10 +140,16 @@ fn read_log(i: &I18n) -> String {
 fn general(ui: &mut egui::Ui, i: &I18n, s: &mut Settings) {
     egui::Grid::new("general").num_columns(2).show(ui, |ui| {
         row(ui, i.tr("settings-language"), |ui| {
-            let langs: Vec<(&str, String)> = settings::LANGUAGES
-                .iter()
-                .map(|&l| (l, i.tr("lang-es")))
-                .collect();
+            let name = |l| match l {
+                "en" => i.tr("lang-en"),
+                "pt" => i.tr("lang-pt"),
+                "ca" => i.tr("lang-ca"),
+                _ => i.tr("lang-es"),
+            };
+            let langs: Vec<(&str, String)> =
+                std::iter::once((settings::SYSTEM_LANGUAGE, i.tr("lang-system")))
+                    .chain(crate::i18n::LANGUAGES.map(|l| (l, name(l))))
+                    .collect();
             let mut lang = s.language.as_str();
             combo(ui, "lang", &mut lang, &langs);
             s.language = lang.to_string();

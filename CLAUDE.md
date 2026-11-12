@@ -8,7 +8,7 @@ Deepslate Studio es un editor de skins de escritorio para un juego de bloques, h
 
 - **Licencia:** GPLv3. Todo código y todo recurso que entre debe ser compatible con GPLv3.
 - **Plataformas:** Linux (la principal) y Windows. Las dos tienen que compilar y pasar las pruebas.
-- **Idiomas:** español (base), inglés, portugués y catalán.
+- **Idiomas:** español (base), inglés, portugués de Brasil y catalán.
 - **Objetivo:** editor rápido, sin cuenta ni publicidad, con identidad visual propia.
 
 ## Comandos
@@ -31,7 +31,7 @@ La CI (`.github/workflows/ci.yml`) ejecuta `fmt`, `clippy` y `test` en Linux y e
 | Vista 3D | `wgpu` (a través de eframe) |
 | PNG | `image` y `png` (este último para los bloques de texto del PNG) |
 | Ajustes | `serde` con RON |
-| Traducciones | `fluent-bundle` |
+| Traducciones | `fluent-bundle`, y `sys-locale` para detectar el idioma del sistema |
 | Diálogos de archivo | `rfd` |
 | Rutas de datos | `directories` |
 | Registro | `log` |
@@ -51,7 +51,7 @@ src/
   i18n/        carga de traducciones
   ui/          ventana, paneles, diálogos y ventana de ajustes
 assets/
-  i18n/<idioma>/main.ftl   textos de la interfaz
+  i18n/<idioma>/main.ftl   textos de la interfaz (es, en, pt, ca)
   icon.png                 ícono de la app
 ```
 
@@ -71,7 +71,7 @@ Las dependencias entre módulos van en un solo sentido: `ui` usa todo lo demás;
 
 **Textos**
 - Ningún texto visible queda fijo en el código: todo sale de `assets/i18n/`.
-- Al agregar una clave, agrégala en todos los idiomas que existan. Si no tienes la traducción, marca la línea como pendiente, pero nunca la dejes vacía. Si falta un texto, se muestra en español.
+- Al agregar una clave, agrégala en `es`, `en`, `pt` y `ca`. La prueba `languages_match_spanish` falla si algún idioma no tiene exactamente las mismas claves que el español. Si no tienes la traducción, pon el texto en español con un comentario `# pendiente` arriba; nunca dejes la clave vacía.
 - Pasa las claves literales a `tr("…")`, no las armes en tiempo de ejecución: si no, la prueba de claves no las encuentra.
 
 **Marcas y recursos de terceros**

@@ -17,6 +17,7 @@ png = "0.18"
 rfd = "0.18"
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
+sys-locale = "0.3"
 unic-langid = "0.9"
 
 [profile.release]

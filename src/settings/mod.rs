@@ -195,7 +195,7 @@ impl Default for Settings {
             shortcuts: BTreeMap::new(),
             recent_colors: Vec::new(),
             palette: Vec::new(),
-            language: "es".into(),
+            language: SYSTEM_LANGUAGE.into(),
             start_view: StartView::Last,
             open_last: false,
             last_file: None,
@@ -218,9 +218,19 @@ pub const UNDO_LEVELS: std::ops::RangeInclusive<usize> = 1..=1000;
 pub const AUTOSAVE_MINUTES: std::ops::RangeInclusive<u32> = 1..=60;
 pub const LIGHTING: std::ops::RangeInclusive<f32> = 0.0..=1.0;
 pub const ROTATE_SPEED: std::ops::RangeInclusive<f32> = 0.2..=3.0;
-pub const LANGUAGES: [&str; 1] = ["es"];
+/// Valor de `language` que sigue al idioma del sistema.
+pub const SYSTEM_LANGUAGE: &str = "system";
 
 impl Settings {
+    /// Código del idioma a mostrar.
+    pub fn resolved_language(&self) -> &str {
+        if self.language == SYSTEM_LANGUAGE {
+            crate::i18n::system_language()
+        } else {
+            &self.language
+        }
+    }
+
     /// Valores por defecto, pero conservando la paleta: es contenido del usuario.
     pub fn reset(&mut self) {
         let palette = std::mem::take(&mut self.palette);
@@ -332,8 +342,10 @@ impl Settings {
         self.rotate_speed = self
             .rotate_speed
             .clamp(*ROTATE_SPEED.start(), *ROTATE_SPEED.end());
-        if !LANGUAGES.contains(&self.language.as_str()) {
-            self.language = "es".into();
+        if self.language != SYSTEM_LANGUAGE
+            && !crate::i18n::LANGUAGES.contains(&self.language.as_str())
+        {
+            self.language = SYSTEM_LANGUAGE.into();
         }
         self
     }

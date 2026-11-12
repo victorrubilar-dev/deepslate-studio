@@ -167,7 +167,12 @@ settings-3d = Vista 3D
 settings-export = Exportación
 settings-advanced = Avanzado
 settings-language = Idioma
+lang-system = Idioma del sistema
+# Los nombres de idioma van siempre en su propio idioma.
 lang-es = Español
+lang-en = English
+lang-pt = Português
+lang-ca = Català
 settings-start-view = Vista al iniciar
 start-view-last = La última usada
 settings-open-last = Abrir la última skin al iniciar
