@@ -10,6 +10,10 @@ mod settings;
 mod ui;
 
 fn main() -> eframe::Result {
+    if let Some(p) = settings::log::path() {
+        settings::log::init(&p);
+    }
+    log::info!("Deepslate Studio {}", env!("CARGO_PKG_VERSION"));
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Deepslate Studio")

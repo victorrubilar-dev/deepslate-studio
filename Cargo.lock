@@ -393,6 +393,7 @@ dependencies = [
  "eframe",
  "fluent-bundle",
  "image",
+ "log",
  "png",
  "rfd",
  "ron",

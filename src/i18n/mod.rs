@@ -88,4 +88,15 @@ mod tests {
         }
         assert!(missing.is_empty(), "claves sin traducir: {missing:?}");
     }
+
+    #[test]
+    fn escaped_braces_render() {
+        let i = I18n::spanish();
+        let hint = i.tr("settings-export-name-hint");
+        assert!(
+            hint.contains("{name}") && hint.contains("{model}"),
+            "{hint}"
+        );
+        assert_eq!(i.tr("unit-minutes"), " min");
+    }
 }

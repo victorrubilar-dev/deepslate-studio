@@ -2,6 +2,7 @@
 
 struct Uniforms {
     mvp: mat4x4<f32>,
+    // xyz: dirección de la luz; w: intensidad (0 = color plano).
     light: vec4<f32>,
     // x: índice de la parte seleccionada, o -1.
     selected: vec4<f32>,
@@ -30,7 +31,8 @@ fn vs(v: VIn) -> VOut {
     var o: VOut;
     o.clip = u.mvp * vec4<f32>(v.pos, 1.0);
     o.uv = v.uv;
-    o.shade = 0.6 + 0.4 * max(dot(normalize(v.normal), normalize(u.light.xyz)), 0.0);
+    let lit = 0.6 + 0.4 * max(dot(normalize(v.normal), normalize(u.light.xyz)), 0.0);
+    o.shade = mix(1.0, lit, u.light.w);
     o.selected = select(0.0, 1.0, abs(v.part - u.selected.x) < 0.5);
     return o;
 }

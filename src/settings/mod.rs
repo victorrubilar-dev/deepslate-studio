@@ -1,11 +1,23 @@
-//! Ajustes básicos guardados en RON, en la carpeta de configuración estándar del sistema.
+//! Ajustes guardados en RON, en la carpeta de configuración estándar del sistema.
 
+pub mod log;
+
+use crate::editor::Tool;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum View {
+    Flat,
+    ThreeD,
+    Preview,
+}
+
+/// Vista al abrir la app: la última usada o una fija.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StartView {
+    Last,
     Flat,
     ThreeD,
 }
@@ -42,14 +54,16 @@ pub enum Action {
     ToggleMirror,
     SwapColors,
     ToggleView,
+    QuickExport,
 }
 
-pub const ACTIONS: [Action; 22] = [
+pub const ACTIONS: [Action; 23] = [
     Action::New,
     Action::Open,
     Action::Save,
     Action::SaveAs,
     Action::Export,
+    Action::QuickExport,
     Action::Undo,
     Action::Redo,
     Action::CopySelection,
@@ -100,6 +114,7 @@ impl Action {
             Action::Save => (true, false, "S"),
             Action::SaveAs => (true, true, "S"),
             Action::Export => (true, false, "E"),
+            Action::QuickExport => (true, true, "E"),
             Action::Undo => (true, false, "Z"),
             Action::Redo => (true, true, "Z"),
             Action::CopySelection => (true, false, "C"),
@@ -144,6 +159,27 @@ pub struct Settings {
     /// Colores usados, el más reciente primero.
     pub recent_colors: Vec<[u8; 4]>,
     pub palette: Vec<NamedColor>,
+
+    pub language: String,
+    pub start_view: StartView,
+    pub open_last: bool,
+    pub last_file: Option<PathBuf>,
+    /// Solo guarda proyectos que ya tienen archivo.
+    pub autosave: bool,
+    pub autosave_minutes: u32,
+    pub start_tool: Tool,
+
+    /// Fondo de la vista 3D; `None` deja el del panel. La captura siempre es transparente.
+    pub background_3d: Option<[u8; 3]>,
+    /// 0 = color plano, 1 = luz direccional completa.
+    pub lighting: f32,
+    pub rotate_speed: f32,
+    pub shadow: bool,
+
+    pub export_dir: Option<PathBuf>,
+    /// Admite `{name}` y `{model}`.
+    pub export_name: String,
+    pub confirm_overwrite: bool,
 }
 
 impl Default for Settings {
@@ -157,14 +193,65 @@ impl Default for Settings {
             shortcuts: BTreeMap::new(),
             recent_colors: Vec::new(),
             palette: Vec::new(),
+            language: "es".into(),
+            start_view: StartView::Last,
+            open_last: false,
+            last_file: None,
+            autosave: false,
+            autosave_minutes: 5,
+            start_tool: Tool::Pencil,
+            background_3d: None,
+            lighting: 1.0,
+            rotate_speed: 1.0,
+            shadow: true,
+            export_dir: None,
+            export_name: "{name}".into(),
+            confirm_overwrite: true,
         }
     }
 }
 
 pub const PIXEL_SIZE: std::ops::RangeInclusive<f32> = 2.0..=40.0;
 pub const UNDO_LEVELS: std::ops::RangeInclusive<usize> = 1..=1000;
+pub const AUTOSAVE_MINUTES: std::ops::RangeInclusive<u32> = 1..=60;
+pub const LIGHTING: std::ops::RangeInclusive<f32> = 0.0..=1.0;
+pub const ROTATE_SPEED: std::ops::RangeInclusive<f32> = 0.2..=3.0;
+pub const LANGUAGES: [&str; 1] = ["es"];
 
 impl Settings {
+    /// Valores por defecto, pero conservando la paleta: es contenido del usuario.
+    pub fn reset(&mut self) {
+        let palette = std::mem::take(&mut self.palette);
+        *self = Self {
+            palette,
+            ..Self::default()
+        };
+    }
+
+    /// Nombre de archivo para «Exportar rápido», sin separadores de ruta y con `.png`.
+    pub fn export_file_name(&self, name: &str, model: &str) -> String {
+        let n: String = self
+            .export_name
+            .replace("{name}", name)
+            .replace("{model}", model)
+            .chars()
+            .map(|c| {
+                if c == '/' || c == '\\' || c == ':' {
+                    '_'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let n = n.trim();
+        let n = if n.is_empty() { "skin" } else { n };
+        if n.to_ascii_lowercase().ends_with(".png") {
+            n.to_string()
+        } else {
+            format!("{n}.png")
+        }
+    }
+
     pub fn path() -> Option<PathBuf> {
         directories::ProjectDirs::from("", "", "deepslate-studio")
             .map(|d| d.config_dir().join("settings.ron"))
@@ -236,6 +323,16 @@ impl Settings {
             .undo_levels
             .clamp(*UNDO_LEVELS.start(), *UNDO_LEVELS.end());
         self.recent_colors.truncate(RECENT_COLORS);
+        self.autosave_minutes = self
+            .autosave_minutes
+            .clamp(*AUTOSAVE_MINUTES.start(), *AUTOSAVE_MINUTES.end());
+        self.lighting = self.lighting.clamp(*LIGHTING.start(), *LIGHTING.end());
+        self.rotate_speed = self
+            .rotate_speed
+            .clamp(*ROTATE_SPEED.start(), *ROTATE_SPEED.end());
+        if !LANGUAGES.contains(&self.language.as_str()) {
+            self.language = "es".into();
+        }
         self
     }
 }
@@ -329,5 +426,32 @@ mod tests {
         assert_eq!(s.recent_colors.len(), RECENT_COLORS);
         assert_eq!(s.recent_colors[0], [5, 0, 0, 255]);
         assert_eq!(s.recent_colors.iter().filter(|c| c[0] == 5).count(), 1);
+    }
+
+    #[test]
+    fn export_names() {
+        let mut s = Settings::default();
+        assert_eq!(s.export_file_name("mia", "Alex"), "mia.png");
+        s.export_name = "{name}-{model}".into();
+        assert_eq!(s.export_file_name("a/b", "Steve"), "a_b-Steve.png");
+        s.export_name = "  ".into();
+        assert_eq!(s.export_file_name("x", "Steve"), "skin.png");
+        s.export_name = "{name}.PNG".into();
+        assert_eq!(s.export_file_name("x", "Steve"), "x.PNG");
+    }
+
+    #[test]
+    fn reset_keeps_palette() {
+        let mut s = Settings {
+            show_grid: false,
+            palette: vec![NamedColor {
+                name: "piel".into(),
+                rgba: [1, 2, 3, 255],
+            }],
+            ..Default::default()
+        };
+        s.reset();
+        assert!(s.show_grid);
+        assert_eq!(s.palette.len(), 1);
     }
 }

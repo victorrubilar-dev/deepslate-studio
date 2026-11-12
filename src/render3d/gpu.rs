@@ -19,6 +19,10 @@ pub struct Scene<'a> {
     pub camera: &'a Camera,
     pub selected: Option<Part>,
     pub visible: &'a dyn Fn(Part, Layer) -> bool,
+    /// Dibujar la capa de la espalda con la textura subida en `upload_cape`.
+    pub cape: bool,
+    /// 0 = color plano, 1 = luz direccional completa.
+    pub lighting: f32,
 }
 
 #[repr(C)]
@@ -41,8 +45,10 @@ pub struct Renderer3d {
     base: wgpu::RenderPipeline,
     overlay: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    cape_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
     skin: wgpu::Texture,
+    cape: wgpu::Texture,
     target: Option<Target>,
     texture_id: Option<egui::TextureId>,
 }
@@ -54,20 +60,24 @@ impl Renderer3d {
             label: Some("skin3d"),
             source: wgpu::ShaderSource::Wgsl(include_str!("skin.wgsl").into()),
         });
-        let skin = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("skin"),
-            size: wgpu::Extent3d {
-                width: 64,
-                height: 64,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        let texture = |label, height| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let skin = texture("skin", 64);
+        let cape = texture("cape", 32);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default()); // Nearest por defecto
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("uniforms"),
@@ -106,26 +116,29 @@ impl Renderer3d {
                 },
             ],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("skin3d"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(
-                        &skin.create_view(&Default::default()),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
+        let group = |tex: &wgpu::Texture| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("skin3d"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(
+                            &tex.create_view(&Default::default()),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                ],
+            })
+        };
+        let (bind_group, cape_group) = (group(&skin), group(&cape));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("skin3d"),
             bind_group_layouts: &[Some(&layout)],
@@ -183,27 +196,36 @@ impl Renderer3d {
             overlay: pipeline("fs_overlay", Some(blend)),
             rs: rs.clone(),
             bind_group,
+            cape_group,
             uniforms,
             skin,
+            cape,
             target: None,
             texture_id: None,
         }
     }
 
     pub fn upload_skin(&self, pixels: &RgbaImage) {
+        self.upload(&self.skin, pixels);
+    }
+
+    /// Textura de 64×32 para la capa de la espalda.
+    pub fn upload_cape(&self, pixels: &RgbaImage) {
+        self.upload(&self.cape, pixels);
+    }
+
+    fn upload(&self, tex: &wgpu::Texture, pixels: &RgbaImage) {
+        let size = tex.size();
+        debug_assert_eq!((pixels.width(), pixels.height()), (size.width, size.height));
         self.rs.queue.write_texture(
-            self.skin.as_image_copy(),
+            tex.as_image_copy(),
             pixels.as_raw(),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(64 * 4),
-                rows_per_image: Some(64),
+                bytes_per_row: Some(size.width * 4),
+                rows_per_image: Some(size.height),
             },
-            wgpu::Extent3d {
-                width: 64,
-                height: 64,
-                depth_or_array_layers: 1,
-            },
+            size,
         );
     }
 
@@ -323,10 +345,15 @@ impl Renderer3d {
     fn draw(&self, target: &Target, scene: &Scene) {
         let device = &self.rs.device;
         let (base, overlay) = mesh::build(scene.model, scene.pose, scene.camera, scene.visible);
+        let cape = if scene.cape {
+            mesh::cape(scene.pose, scene.camera)
+        } else {
+            Vec::new()
+        };
         let [w, h] = target.size;
         let u = Uniforms {
             mvp: mesh::projection(w as f32 / h as f32, scene.camera),
-            light: [-0.45, 0.6, 0.65, 0.0],
+            light: [-0.45, 0.6, 0.65, scene.lighting],
             selected: [
                 scene.selected.map_or(-1.0, |p| p as usize as f32),
                 0.0,
@@ -346,7 +373,7 @@ impl Renderer3d {
                 })
             })
         };
-        let (base_buf, overlay_buf) = (buffer(&base), buffer(&overlay));
+        let (base_buf, overlay_buf, cape_buf) = (buffer(&base), buffer(&overlay), buffer(&cape));
         let resolve = target.color.create_view(&Default::default());
         let mut enc = device.create_command_encoder(&Default::default());
         {
@@ -373,12 +400,13 @@ impl Renderer3d {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            for (pipeline, buf, n) in [
-                (&self.base, &base_buf, base.len()),
-                (&self.overlay, &overlay_buf, overlay.len()),
+            for (pipeline, group, buf, n) in [
+                (&self.base, &self.cape_group, &cape_buf, cape.len()),
+                (&self.base, &self.bind_group, &base_buf, base.len()),
+                (&self.overlay, &self.bind_group, &overlay_buf, overlay.len()),
             ] {
                 if let Some(buf) = buf {
+                    pass.set_bind_group(0, group, &[]);
                     pass.set_pipeline(pipeline);
                     pass.set_vertex_buffer(0, buf.slice(..));
                     pass.draw(0..n as u32, 0..1);
@@ -464,6 +492,19 @@ mod tests {
         };
         let r = Renderer3d::new(&rs);
         r.upload_skin(&test_skin().pixels);
+        // Capa: exterior roja con esquina negra, interior azul.
+        let mut cape = RgbaImage::from_pixel(64, 32, image::Rgba([60, 90, 220, 255]));
+        for (x, y, p) in cape.enumerate_pixels_mut() {
+            if (1..11).contains(&x) && (1..17).contains(&y) {
+                let corner = x < 3 && y < 3;
+                *p = image::Rgba(if corner {
+                    [0, 0, 0, 255]
+                } else {
+                    [220, 60, 60, 255]
+                });
+            }
+        }
+        r.upload_cape(&cape);
         let out = std::path::PathBuf::from(
             std::env::var("DEEPSLATE_RENDER_OUT").unwrap_or_else(|_| ".".into()),
         );
@@ -494,6 +535,8 @@ mod tests {
                 camera: &camera,
                 selected: Some(Part::Head),
                 visible: &|_, _| true,
+                cape: true,
+                lighting: 1.0,
             };
             let img = r.capture(384, &scene).expect("captura");
             assert!(img.pixels().any(|p| p[3] == 255), "no se dibujó nada");

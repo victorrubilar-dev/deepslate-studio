@@ -1,12 +1,14 @@
 //! Ventana principal: menús, panel de herramientas, lienzo 2D y diálogos.
 
+mod settings_window;
+
 use crate::core::{FACES, LAYERS, Layer, LoadError, Model, PARTS, Part, Skin, convert_model, rect};
 use crate::editor::colors::{palette_from, parse_hex, to_hex};
 use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
 use crate::project::{self, Project, ProjectError};
-use crate::render3d::{Camera, PRESETS, Preset, Renderer3d, Scene, pick};
-use crate::settings::{self, ACTIONS, Action, NamedColor, Settings, Shortcut, Theme, View};
+use crate::render3d::{Camera, PRESETS, Preset, Renderer3d, Scene, pick, project};
+use crate::settings::{Action, NamedColor, Settings, Shortcut, StartView, Theme, View};
 use eframe::egui::{
     self, Color32, ColorImage, Key, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle,
     TextureOptions, Vec2, color_picker, ecolor::Hsva,
@@ -24,10 +26,32 @@ enum After {
 enum Dialog {
     Discard(After),
     Convert(Skin),
-    Export(usize),
+    /// Píxeles translúcidos y si es exportación rápida.
+    Export(usize, bool),
+    Overwrite(PathBuf),
+    ResetSettings,
     Error(String),
     CopyParts(PartMask),
     PasteParts(PartMask),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PreviewBase {
+    Mannequin,
+    Current,
+    Loaded,
+}
+
+/// Estado del previsualizador. Nada de esto se guarda: la skin y la capa cargadas
+/// solo viven en memoria.
+struct PreviewState {
+    base: PreviewBase,
+    skin: Option<Skin>,
+    skin_rev: u64,
+    cape: bool,
+    cape_color: [u8; 3],
+    cape_img: Option<RgbaImage>,
+    cape_rev: u64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -63,7 +87,13 @@ pub struct App {
     status: String,
     closing: bool,
     renderer: Option<Renderer3d>,
-    uploaded_rev: Option<u64>,
+    /// Qué skin hay en la GPU: (origen, revisión).
+    uploaded: Option<(u8, u64)>,
+    cape_uploaded: Option<u64>,
+    pv: PreviewState,
+    last_autosave: f64,
+    /// Contenido del registro mientras su ventana está abierta.
+    log_text: Option<String>,
     camera: Camera,
     selected: Option<Part>,
     /// Color secundario, el final del degradado.
@@ -90,7 +120,21 @@ impl App {
             .map(Settings::load_from)
             .unwrap_or_default();
         cc.egui_ctx.set_theme(theme_pref(settings.theme));
-        Self {
+        let mut settings = settings;
+        match settings.start_view {
+            StartView::Last => {}
+            StartView::Flat => settings.view = View::Flat,
+            StartView::ThreeD => settings.view = View::ThreeD,
+        }
+        if cc.wgpu_render_state.is_none() {
+            log::warn!("sin wgpu: la vista 3D no estará disponible");
+        }
+        let last = settings
+            .open_last
+            .then(|| settings.last_file.clone())
+            .flatten();
+        let start_tool = settings.start_tool;
+        let mut app = Self {
             i18n: I18n::spanish(),
             editor: Editor::new(Skin::blank(Model::Steve), settings.undo_levels),
             settings,
@@ -110,7 +154,19 @@ impl App {
             closing: false,
             // Solo es None si eframe no arrancó con wgpu; entonces la vista 3D muestra un aviso.
             renderer: cc.wgpu_render_state.as_ref().map(Renderer3d::new),
-            uploaded_rev: None,
+            uploaded: None,
+            cape_uploaded: None,
+            pv: PreviewState {
+                base: PreviewBase::Mannequin,
+                skin: None,
+                skin_rev: 0,
+                cape: true,
+                cape_color: [255, 255, 255],
+                cape_img: None,
+                cape_rev: 0,
+            },
+            last_autosave: 0.0,
+            log_text: None,
             camera: Camera::default(),
             selected: None,
             color2: Hsva::from_srgba_unmultiplied([255, 255, 255, 255]),
@@ -122,7 +178,12 @@ impl App {
             binding: None,
             bind_msg: String::new(),
             new_color_name: String::new(),
+        };
+        app.tool = start_tool;
+        if let Some(path) = last.filter(|p| p.exists()) {
+            app.open_path(path);
         }
+        app
     }
 
     fn set_project(&mut self, project: Project, path: Option<PathBuf>) {
@@ -131,7 +192,7 @@ impl App {
         self.editor.mark_saved();
         self.path = path;
         self.texture_rev = None;
-        self.uploaded_rev = None;
+        self.uploaded = None;
     }
 
     // ---- Archivo ----
@@ -162,9 +223,12 @@ impl App {
     }
 
     fn open(&mut self) {
-        let Some(path) = png_dialog().pick_file() else {
-            return;
-        };
+        if let Some(path) = png_dialog().pick_file() {
+            self.open_path(path);
+        }
+    }
+
+    fn open_path(&mut self, path: PathBuf) {
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
@@ -184,6 +248,8 @@ impl App {
                     "status-imported"
                 };
                 self.status = self.i18n.tr_args(key, &[("file", file_name(&path).into())]);
+                log::info!("abierto {}", path.display());
+                self.remember_file(&path);
                 self.set_project(project, is_project.then_some(path));
             }
             Err(e) => self.error(self.load_error(e)),
@@ -217,6 +283,8 @@ impl App {
                 self.status = self
                     .i18n
                     .tr_args("status-saved", &[("file", file_name(&path).into())]);
+                log::info!("guardado {}", path.display());
+                self.remember_file(&path);
                 self.path = Some(path);
                 true
             }
@@ -230,16 +298,57 @@ impl App {
         }
     }
 
-    fn export(&mut self) {
-        let Some(path) = png_dialog().set_file_name("skin.png").save_file() else {
-            return;
+    fn remember_file(&mut self, path: &Path) {
+        if self.settings.last_file.as_deref() != Some(path) {
+            self.settings.last_file = Some(path.to_path_buf());
+            self.settings_changed = true;
+        }
+    }
+
+    /// Nombre para exportar según el formato de Ajustes.
+    fn export_name(&self) -> String {
+        let name = self
+            .path
+            .as_deref()
+            .and_then(Path::file_stem)
+            .map_or_else(|| "skin".into(), |n| n.to_string_lossy().into_owned());
+        let model = format!("{:?}", self.editor.skin().model);
+        self.settings.export_file_name(&name, &model)
+    }
+
+    /// `quick`: sin diálogo, directo a la carpeta predeterminada (si hay una).
+    fn export(&mut self, quick: bool) {
+        let dir = self.settings.export_dir.clone();
+        let path = match (&dir, quick) {
+            (Some(dir), true) => {
+                let path = dir.join(self.export_name());
+                if path.exists() && self.settings.confirm_overwrite {
+                    self.dialog = Some(Dialog::Overwrite(path));
+                    return;
+                }
+                path
+            }
+            _ => {
+                let mut d = png_dialog().set_file_name(self.export_name());
+                if let Some(dir) = &dir {
+                    d = d.set_directory(dir);
+                }
+                match d.save_file() {
+                    Some(p) => with_png_ext(p),
+                    None => return,
+                }
+            }
         };
-        let path = with_png_ext(path);
-        match std::fs::write(&path, self.editor.skin().to_png()) {
+        self.write_export(&path);
+    }
+
+    fn write_export(&mut self, path: &Path) {
+        match std::fs::write(path, self.editor.skin().to_png()) {
             Ok(()) => {
+                log::info!("exportado {}", path.display());
                 self.status = self
                     .i18n
-                    .tr_args("status-exported", &[("file", file_name(&path).into())])
+                    .tr_args("status-exported", &[("file", file_name(path).into())])
             }
             Err(e) => self.error(
                 self.i18n
@@ -248,14 +357,37 @@ impl App {
         }
     }
 
-    fn request_export(&mut self) {
+    fn request_export(&mut self, quick: bool) {
         match self.editor.skin().translucent_base_pixels() {
-            0 => self.export(),
-            n => self.dialog = Some(Dialog::Export(n)),
+            0 => self.export(quick),
+            n => self.dialog = Some(Dialog::Export(n, quick)),
         }
     }
 
+    /// Guarda cada N minutos si hay cambios y el proyecto ya tiene archivo.
+    fn autosave(&mut self, ctx: &egui::Context) {
+        if !self.settings.autosave {
+            return;
+        }
+        let period = self.settings.autosave_minutes as f64 * 60.0;
+        let now = ctx.input(|i| i.time);
+        ctx.request_repaint_after(std::time::Duration::from_secs(30));
+        if now - self.last_autosave < period {
+            return;
+        }
+        if self.editor.is_dirty()
+            && self.path.is_some()
+            && self.dialog.is_none()
+            && !self.painting
+            && self.save(false)
+        {
+            log::info!("autoguardado");
+        }
+        self.last_autosave = now;
+    }
+
     fn error(&mut self, msg: String) {
+        log::error!("{msg}");
         self.status = self
             .i18n
             .tr_args("status-error", &[("detail", msg.clone().into())]);
@@ -299,7 +431,8 @@ impl App {
             Action::SaveAs => {
                 self.save(true);
             }
-            Action::Export => self.request_export(),
+            Action::Export => self.request_export(false),
+            Action::QuickExport => self.request_export(true),
             Action::Undo => self.editor.undo(),
             Action::Redo => self.editor.redo(),
             Action::CopySelection => {
@@ -345,7 +478,7 @@ impl App {
             Action::ToggleView => {
                 self.settings.view = match self.settings.view {
                     View::Flat => View::ThreeD,
-                    View::ThreeD => View::Flat,
+                    View::ThreeD | View::Preview => View::Flat,
                 };
                 self.settings_changed = true;
             }
@@ -395,6 +528,7 @@ impl App {
                 self.menu_item(ui, Action::Save);
                 self.menu_item(ui, Action::SaveAs);
                 self.menu_item(ui, Action::Export);
+                self.menu_item(ui, Action::QuickExport);
             });
             ui.menu_button(self.i18n.tr("menu-edit"), |ui| {
                 self.menu_item(ui, Action::Undo);
@@ -677,11 +811,13 @@ impl App {
 
     fn central(&mut self, ui: &mut egui::Ui) {
         let before = self.settings.view;
-        ui.horizontal(|ui| {
+        let view3d = self.settings.view != View::Flat;
+        ui.horizontal_wrapped(|ui| {
             let i = &self.i18n;
             ui.selectable_value(&mut self.settings.view, View::Flat, i.tr("view-2d"));
             ui.selectable_value(&mut self.settings.view, View::ThreeD, i.tr("view-3d"));
-            if self.settings.view == View::ThreeD {
+            ui.selectable_value(&mut self.settings.view, View::Preview, i.tr("view-preview"));
+            if view3d {
                 ui.separator();
                 ui.label(i.tr("pose"));
                 let current = Preset::matching(self.editor.pose())
@@ -707,40 +843,203 @@ impl App {
                 }
             }
         });
+        if self.settings.view == View::Preview {
+            self.preview_bar(ui);
+        }
         if self.settings.view != before {
             self.settings_changed = true;
         }
         ui.separator();
         match self.settings.view {
             View::Flat => self.canvas(ui),
-            View::ThreeD => self.view3d(ui),
+            View::ThreeD => self.view3d(ui, false),
+            View::Preview => self.view3d(ui, true),
         }
     }
 
-    fn view3d(&mut self, ui: &mut egui::Ui) {
-        let Some(renderer) = &mut self.renderer else {
-            ui.label(self.i18n.tr("view3d-unavailable"));
+    fn preview_bar(&mut self, ui: &mut egui::Ui) {
+        let i = &self.i18n;
+        let (mut load_skin, mut load_cape) = (false, false);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(i.tr("preview-base"));
+            ui.selectable_value(
+                &mut self.pv.base,
+                PreviewBase::Mannequin,
+                i.tr("preview-mannequin"),
+            );
+            ui.selectable_value(
+                &mut self.pv.base,
+                PreviewBase::Current,
+                i.tr("preview-current"),
+            );
+            if self.pv.skin.is_some() {
+                ui.selectable_value(
+                    &mut self.pv.base,
+                    PreviewBase::Loaded,
+                    i.tr("preview-loaded"),
+                );
+            }
+            load_skin = ui.button(i.tr("preview-load-skin")).clicked();
+            ui.separator();
+            ui.checkbox(&mut self.pv.cape, i.tr("preview-cape"));
+            if self.pv.cape {
+                if self.pv.cape_img.is_none() {
+                    let before = self.pv.cape_color;
+                    ui.color_edit_button_srgb(&mut self.pv.cape_color)
+                        .on_hover_text(i.tr("preview-cape-color"));
+                    if before != self.pv.cape_color {
+                        self.pv.cape_rev += 1;
+                    }
+                    load_cape = ui.button(i.tr("preview-load-cape")).clicked();
+                } else if ui.button(i.tr("preview-remove-cape")).clicked() {
+                    self.pv.cape_img = None;
+                    self.pv.cape_rev += 1;
+                }
+            }
+        });
+        ui.weak(i.tr("preview-notice"));
+        if load_skin {
+            self.load_preview_skin();
+        }
+        if load_cape {
+            self.load_preview_cape();
+        }
+    }
+
+    fn read_png(&mut self) -> Option<(PathBuf, Vec<u8>)> {
+        let path = png_dialog().pick_file()?;
+        match std::fs::read(&path) {
+            Ok(b) => Some((path, b)),
+            Err(e) => {
+                self.error(
+                    self.i18n
+                        .tr_args("error-io", &[("detail", e.to_string().into())]),
+                );
+                None
+            }
+        }
+    }
+
+    /// Solo para mirar: no se guarda ni cambia el proyecto.
+    fn load_preview_skin(&mut self) {
+        let Some((_, bytes)) = self.read_png() else {
             return;
         };
+        match Skin::from_png(&bytes) {
+            Ok(skin) => {
+                self.pv.skin = Some(skin);
+                self.pv.skin_rev += 1;
+                self.pv.base = PreviewBase::Loaded;
+            }
+            Err(e) => self.error(self.load_error(ProjectError::Skin(e))),
+        }
+    }
+
+    /// La capa queda solo en memoria; la app nunca la guarda.
+    fn load_preview_cape(&mut self) {
+        let Some((_, bytes)) = self.read_png() else {
+            return;
+        };
+        let cape = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .ok()
+            .and_then(|img| crate::core::cape_texture(&img.to_rgba8()));
+        match cape {
+            Some(img) => {
+                self.pv.cape_img = Some(img);
+                self.pv.cape_rev += 1;
+            }
+            None => self.error(self.i18n.tr("error-cape")),
+        }
+    }
+
+    fn model_3d(&self, preview: bool) -> Model {
+        match (preview, self.pv.base, &self.pv.skin) {
+            (true, PreviewBase::Loaded, Some(s)) => s.model,
+            _ => self.editor.skin().model,
+        }
+    }
+
+    /// Sube a la GPU la skin (y la capa) que toca mostrar, si cambiaron.
+    fn sync_3d(&mut self, preview: bool) {
+        let Some(r) = &self.renderer else {
+            return;
+        };
+        let model = self.editor.skin().model;
+        let key = match (preview, self.pv.base, &self.pv.skin) {
+            (true, PreviewBase::Mannequin, _) => (1, model as u64),
+            (true, PreviewBase::Loaded, Some(_)) => (2, self.pv.skin_rev),
+            _ => (0, self.editor.revision()),
+        };
+        if self.uploaded != Some(key) {
+            match key.0 {
+                1 => r.upload_skin(&Skin::mannequin(model).pixels),
+                2 => r.upload_skin(&self.pv.skin.as_ref().expect("clave 2").pixels),
+                _ => r.upload_skin(&self.editor.skin().pixels),
+            }
+            self.uploaded = Some(key);
+        }
+        if preview && self.cape_uploaded != Some(self.pv.cape_rev) {
+            match &self.pv.cape_img {
+                Some(img) => r.upload_cape(img),
+                None => {
+                    let [cr, cg, cb] = self.pv.cape_color;
+                    r.upload_cape(&RgbaImage::from_pixel(64, 32, Rgba([cr, cg, cb, 255])));
+                }
+            }
+            self.cape_uploaded = Some(self.pv.cape_rev);
+        }
+    }
+
+    fn view3d(&mut self, ui: &mut egui::Ui, preview: bool) {
+        if self.renderer.is_none() {
+            ui.label(self.i18n.tr("view3d-unavailable"));
+            return;
+        }
+        self.sync_3d(preview);
         let (area, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         if resp.dragged() {
-            let d = resp.drag_delta();
-            self.camera.yaw += d.x * 0.5;
-            self.camera.pitch = (self.camera.pitch + d.y * 0.5).clamp(-89.0, 89.0);
+            let d = resp.drag_delta() * 0.5 * self.settings.rotate_speed;
+            self.camera.yaw += d.x;
+            self.camera.pitch = (self.camera.pitch + d.y).clamp(-89.0, 89.0);
         }
         if resp.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             self.camera.distance = (self.camera.distance - scroll * 0.1).clamp(30.0, 160.0);
         }
-        let editor = &self.editor;
-        let visible = |p, l| editor.is_visible(p, l);
         let aspect = area.width() / area.height().max(1.0);
-        if resp.clicked()
+        let painter = ui.painter_at(area);
+        if let Some([r, g, b]) = self.settings.background_3d {
+            painter.rect_filled(area, 0.0, Color32::from_rgb(r, g, b));
+        }
+        if self.settings.shadow {
+            // Sombra simple: una elipse en el suelo, proyectada con la misma cámara.
+            let to_screen = |[nx, ny]: [f32; 2]| {
+                area.center() + Vec2::new(nx * area.width(), -ny * area.height()) / 2.0
+            };
+            let pts: Option<Vec<Pos2>> = (0..32)
+                .map(|k| {
+                    let a = k as f32 / 32.0 * std::f32::consts::TAU;
+                    project(&self.camera, aspect, [a.cos() * 8.0, 0.0, a.sin() * 5.0])
+                        .map(to_screen)
+                })
+                .collect();
+            if let Some(pts) = pts {
+                painter.add(egui::Shape::convex_polygon(
+                    pts,
+                    Color32::from_black_alpha(70),
+                    Stroke::NONE,
+                ));
+            }
+        }
+        let model = self.model_3d(preview);
+        let editor = &self.editor;
+        let visible = |p, l| preview || editor.is_visible(p, l);
+        if !preview
+            && resp.clicked()
             && let Some(pos) = resp.interact_pointer_pos()
         {
             let nx = (pos.x - area.min.x) / area.width() * 2.0 - 1.0;
             let ny = 1.0 - (pos.y - area.min.y) / area.height() * 2.0;
-            let model = editor.skin().model;
             self.selected = pick(
                 model,
                 editor.pose(),
@@ -750,50 +1049,55 @@ impl App {
                 (nx, ny),
             );
         }
-        if self.uploaded_rev != Some(editor.revision()) {
-            renderer.upload_skin(&editor.skin().pixels);
-            self.uploaded_rev = Some(editor.revision());
-        }
         let scene = Scene {
-            model: editor.skin().model,
+            model,
             pose: editor.pose(),
             camera: &self.camera,
-            selected: self.selected,
+            selected: if preview { None } else { self.selected },
             visible: &visible,
+            cape: preview && self.pv.cape,
+            lighting: self.settings.lighting,
         };
         let ppp = ui.ctx().pixels_per_point();
         let size = [area.width(), area.height()].map(|v| (v * ppp).round() as u32);
-        let tex = renderer.render(size, &scene);
-        ui.painter_at(area).image(
+        let tex = self
+            .renderer
+            .as_mut()
+            .expect("comprobado arriba")
+            .render(size, &scene);
+        painter.image(
             tex,
             area,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
         );
-        resp.on_hover_text(self.i18n.tr("view3d-hint"));
+        if !preview {
+            resp.on_hover_text(self.i18n.tr("view3d-hint"));
+        }
     }
 
     fn capture(&mut self) {
-        let Some(renderer) = &mut self.renderer else {
+        if self.renderer.is_none() {
             return;
-        };
+        }
         let Some(path) = png_dialog().set_file_name("captura.png").save_file() else {
             return;
         };
         let path = with_png_ext(path);
+        let preview = self.settings.view == View::Preview;
+        self.sync_3d(preview);
         let editor = &self.editor;
-        if self.uploaded_rev != Some(editor.revision()) {
-            renderer.upload_skin(&editor.skin().pixels);
-            self.uploaded_rev = Some(editor.revision());
-        }
-        let visible = |p, l| editor.is_visible(p, l);
+        let visible = |p, l| preview || editor.is_visible(p, l);
         let scene = Scene {
-            model: editor.skin().model,
+            model: self.model_3d(preview),
             pose: editor.pose(),
             camera: &self.camera,
             selected: None,
             visible: &visible,
+            cape: preview && self.pv.cape,
+            lighting: self.settings.lighting,
         };
+        let renderer = self.renderer.as_ref().expect("comprobado arriba");
         let Some(img) = renderer.capture(1024, &scene) else {
             return self.error(self.i18n.tr("error-capture"));
         };
@@ -1018,78 +1322,6 @@ impl App {
 
     // ---- Ventanas ----
 
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_settings;
-        let before = self.settings.clone();
-        let i = &self.i18n;
-        let themes = [
-            (Theme::System, i.tr("theme-system")),
-            (Theme::Dark, i.tr("theme-dark")),
-            (Theme::Light, i.tr("theme-light")),
-        ];
-        egui::Window::new(i.tr("settings-title"))
-            .open(&mut open)
-            .resizable(false)
-            .show(ctx, |ui| {
-                let s = &mut self.settings;
-                egui::Grid::new("settings").num_columns(2).show(ui, |ui| {
-                    ui.label(i.tr("settings-theme"));
-                    let current = themes
-                        .iter()
-                        .find(|(t, _)| *t == s.theme)
-                        .map(|(_, n)| n.clone())
-                        .unwrap_or_default();
-                    egui::ComboBox::from_id_salt("theme")
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (t, n) in &themes {
-                                ui.selectable_value(&mut s.theme, *t, n);
-                            }
-                        });
-                    ui.end_row();
-                    ui.label(i.tr("settings-pixel-size"));
-                    ui.add(egui::Slider::new(&mut s.pixel_size, settings::PIXEL_SIZE));
-                    ui.end_row();
-                    ui.label(i.tr("settings-grid"));
-                    ui.checkbox(&mut s.show_grid, "");
-                    ui.end_row();
-                    ui.label(i.tr("settings-undo"));
-                    ui.add(egui::DragValue::new(&mut s.undo_levels).range(settings::UNDO_LEVELS));
-                    ui.end_row();
-                });
-                egui::CollapsingHeader::new(i.tr("settings-shortcuts")).show(ui, |ui| {
-                    shortcuts_editor(
-                        ui,
-                        i,
-                        &mut self.settings,
-                        &mut self.binding,
-                        &mut self.bind_msg,
-                    );
-                });
-            });
-        if !open {
-            self.binding = None;
-        }
-        self.show_settings = open;
-
-        if self.settings != before {
-            ctx.set_theme(theme_pref(self.settings.theme));
-            self.editor.set_limit(self.settings.undo_levels);
-            self.settings_changed = true;
-        }
-        // Se escribe al soltar el ratón, no en cada cuadro mientras se arrastra un control.
-        if self.settings_changed && !ctx.input(|i| i.pointer.any_down()) {
-            self.settings_changed = false;
-            if let Some(path) = &self.settings_path
-                && let Err(e) = self.settings.save_to(path)
-            {
-                self.status = self
-                    .i18n
-                    .tr_args("error-io", &[("detail", e.to_string().into())]);
-            }
-        }
-    }
-
     fn dialogs(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.dialog.take() else {
             return;
@@ -1155,12 +1387,32 @@ impl App {
                     ],
                 )
             }
-            Dialog::Export(n) => {
+            Dialog::Export(n, _) => {
                 ui.label(i.tr_args("export-translucent", &[("count", (*n).into())]));
                 buttons(
                     ui,
                     &[
                         (Choice::Accept, i.tr("export-anyway")),
+                        (Choice::Cancel, i.tr("cancel")),
+                    ],
+                )
+            }
+            Dialog::Overwrite(path) => {
+                ui.label(i.tr_args("export-overwrite", &[("file", file_name(path).into())]));
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("export-replace")),
+                        (Choice::Cancel, i.tr("cancel")),
+                    ],
+                )
+            }
+            Dialog::ResetSettings => {
+                ui.label(i.tr("settings-reset-question"));
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("settings-reset")),
                         (Choice::Cancel, i.tr("cancel")),
                     ],
                 )
@@ -1211,7 +1463,14 @@ impl App {
             }
             (Dialog::Discard(after), Choice::Alternate) => self.run(ctx, after),
             (Dialog::Convert(skin), Choice::Accept) => self.editor.replace(skin),
-            (Dialog::Export(_), Choice::Accept) => self.export(),
+            (Dialog::Export(_, quick), Choice::Accept) => self.export(quick),
+            (Dialog::Overwrite(path), Choice::Accept) => self.write_export(&path),
+            (Dialog::ResetSettings, Choice::Accept) => {
+                self.settings.reset();
+                ctx.set_theme(theme_pref(self.settings.theme));
+                self.editor.set_limit(self.settings.undo_levels);
+                self.settings_changed = true;
+            }
             (Dialog::CopyParts(mask), Choice::Accept) => {
                 self.clip = Some((self.editor.skin().clone(), mask));
                 self.status = self.i18n.tr("status-parts-copied");
@@ -1231,6 +1490,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.handle_close(&ctx);
         self.shortcuts(&ctx);
+        self.autosave(&ctx);
         egui::Panel::top("menu").show(ui, |ui| self.menu(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         egui::Panel::left("tools")
@@ -1238,76 +1498,8 @@ impl eframe::App for App {
             .show(ui, |ui| self.side(ui));
         egui::CentralPanel::default_margins().show(ui, |ui| self.central(ui));
         self.settings_window(&ctx);
+        self.log_window(&ctx);
         self.dialogs(&ctx);
-    }
-}
-
-/// Lista de atajos: clic en uno y pulsar la combinación nueva. Esc cancela.
-fn shortcuts_editor(
-    ui: &mut egui::Ui,
-    i: &I18n,
-    s: &mut Settings,
-    binding: &mut Option<Action>,
-    msg: &mut String,
-) {
-    if let Some(action) = *binding {
-        let pressed = ui.input(|inp| {
-            inp.events.iter().find_map(|e| match e {
-                egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } => Some((*key, *modifiers)),
-                _ => None,
-            })
-        });
-        match pressed {
-            Some((Key::Escape, _)) => *binding = None,
-            Some((key, m)) => {
-                *binding = None;
-                match s.bind(action, Some(shortcut_of(key, m))) {
-                    Ok(()) => msg.clear(),
-                    Err(other) => {
-                        *msg = i.tr_args(
-                            "shortcut-clash",
-                            &[("action", action_name(i, other).into())],
-                        )
-                    }
-                }
-            }
-            None => {}
-        }
-    }
-    if !msg.is_empty() {
-        ui.colored_label(ui.visuals().warn_fg_color, msg.as_str());
-    }
-    egui::ScrollArea::vertical()
-        .max_height(300.0)
-        .show(ui, |ui| {
-            egui::Grid::new("shortcuts").num_columns(3).show(ui, |ui| {
-                for action in ACTIONS {
-                    ui.label(action_name(i, action));
-                    let text = if *binding == Some(action) {
-                        i.tr("shortcut-press")
-                    } else {
-                        s.shortcut(action)
-                            .map_or_else(|| i.tr("shortcut-none"), |sc| shortcut_label(i, &sc))
-                    };
-                    if ui.button(text).clicked() {
-                        *binding = Some(action);
-                        msg.clear();
-                    }
-                    if ui.small_button(i.tr("shortcut-clear")).clicked() {
-                        let _ = s.bind(action, None);
-                    }
-                    ui.end_row();
-                }
-            });
-        });
-    if ui.button(i.tr("shortcut-reset")).clicked() {
-        s.shortcuts.clear();
-        msg.clear();
     }
 }
 
@@ -1381,6 +1573,7 @@ fn action_name(i: &I18n, a: Action) -> String {
         Action::Save => i.tr("file-save"),
         Action::SaveAs => i.tr("file-save-as"),
         Action::Export => i.tr("file-export"),
+        Action::QuickExport => i.tr("file-quick-export"),
         Action::Undo => i.tr("edit-undo"),
         Action::Redo => i.tr("edit-redo"),
         Action::CopySelection => i.tr("edit-copy-selection"),

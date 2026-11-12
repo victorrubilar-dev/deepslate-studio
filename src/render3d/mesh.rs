@@ -217,57 +217,120 @@ pub fn build(
 ) -> (Vec<Vertex>, Vec<Vertex>) {
     let (mut base, mut overlay) = (Vec::new(), Vec::new());
     for b in boxes(model, pose, cam, visible) {
-        let ([x0, y0, z0], [x1, y1, z1]) = (b.min, b.max);
         let out = if b.layer == Layer::Base {
             &mut base
         } else {
             &mut overlay
         };
-        for face in crate::core::FACES {
-            // Esquinas vistas desde fuera: arriba-izq, arriba-der, abajo-der, abajo-izq.
-            let (corners, normal): ([V3; 4], V3) = match face {
-                Face::Front => (
-                    [[x0, y1, z1], [x1, y1, z1], [x1, y0, z1], [x0, y0, z1]],
-                    [0.0, 0.0, 1.0],
-                ),
-                Face::Back => (
-                    [[x1, y1, z0], [x0, y1, z0], [x0, y0, z0], [x1, y0, z0]],
-                    [0.0, 0.0, -1.0],
-                ),
-                Face::Right => (
-                    [[x0, y1, z0], [x0, y1, z1], [x0, y0, z1], [x0, y0, z0]],
-                    [-1.0, 0.0, 0.0],
-                ),
-                Face::Left => (
-                    [[x1, y1, z1], [x1, y1, z0], [x1, y0, z0], [x1, y0, z1]],
-                    [1.0, 0.0, 0.0],
-                ),
-                Face::Top => (
-                    [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]],
-                    [0.0, 1.0, 0.0],
-                ),
-                // Igual que en el juego: el borde de abajo de la textura toca el frente.
-                Face::Bottom => (
-                    [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
-                    [0.0, -1.0, 0.0],
-                ),
-            };
+        let uv = |face| {
             let r = rect(b.part, b.layer, face, model);
-            let (u0, v0) = (r.x as f32 / 64.0, r.y as f32 / 64.0);
-            let (u1, v1) = ((r.x + r.w) as f32 / 64.0, (r.y + r.h) as f32 / 64.0);
-            let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
-            let normal = apply(b.xf.r, normal);
-            for i in [0, 3, 2, 0, 2, 1] {
-                out.push(Vertex {
-                    pos: b.xf.point(corners[i]),
-                    uv: uvs[i],
-                    normal,
-                    part: b.part as usize as f32,
-                });
-            }
-        }
+            [r.x, r.y, r.x + r.w, r.y + r.h].map(|v| v as f32 / 64.0)
+        };
+        cuboid(out, b.min, b.max, &b.xf, b.part as usize as f32, uv);
     }
     (base, overlay)
+}
+
+/// Índice de parte para la capa de la espalda; nunca coincide con la selección.
+const CAPE_PART: f32 = 6.0;
+
+/// Capa de la espalda: caja de 10×16×1 colgada de los hombros, un poco inclinada hacia atrás.
+/// Usa la disposición habitual de una textura de 64×32. Es una aproximación.
+pub fn cape(pose: &Pose, cam: &Camera) -> Vec<Vertex> {
+    let xf = Xf::about([0.0, 24.0, -2.0], [10.0, 0.0, 0.0])
+        .then(part_xf(Part::Body, pose, Model::Steve))
+        .then(view_xf(cam));
+    // La capa se ve desde atrás: su cara «frontal» en la textura es la exterior (-Z).
+    let uv = |face| {
+        let (x, y, w, h) = match face {
+            Face::Top => (1, 0, 10, 1),
+            Face::Bottom => (11, 0, 10, 1),
+            Face::Left => (0, 1, 1, 16),
+            Face::Back => (1, 1, 10, 16),
+            Face::Right => (11, 1, 1, 16),
+            Face::Front => (12, 1, 10, 16),
+        };
+        [
+            x as f32 / 64.0,
+            y as f32 / 32.0,
+            (x + w) as f32 / 64.0,
+            (y + h) as f32 / 32.0,
+        ]
+    };
+    let mut out = Vec::new();
+    cuboid(
+        &mut out,
+        [-5.0, 8.0, -3.0],
+        [5.0, 24.0, -2.0],
+        &xf,
+        CAPE_PART,
+        uv,
+    );
+    out
+}
+
+/// Agrega las 6 caras de una caja. `uv` da (u0, v0, u1, v1) de cada cara.
+fn cuboid(
+    out: &mut Vec<Vertex>,
+    [x0, y0, z0]: V3,
+    [x1, y1, z1]: V3,
+    xf: &Xf,
+    part: f32,
+    uv: impl Fn(Face) -> [f32; 4],
+) {
+    for face in crate::core::FACES {
+        // Esquinas vistas desde fuera: arriba-izq, arriba-der, abajo-der, abajo-izq.
+        let (corners, normal): ([V3; 4], V3) = match face {
+            Face::Front => (
+                [[x0, y1, z1], [x1, y1, z1], [x1, y0, z1], [x0, y0, z1]],
+                [0.0, 0.0, 1.0],
+            ),
+            Face::Back => (
+                [[x1, y1, z0], [x0, y1, z0], [x0, y0, z0], [x1, y0, z0]],
+                [0.0, 0.0, -1.0],
+            ),
+            Face::Right => (
+                [[x0, y1, z0], [x0, y1, z1], [x0, y0, z1], [x0, y0, z0]],
+                [-1.0, 0.0, 0.0],
+            ),
+            Face::Left => (
+                [[x1, y1, z1], [x1, y1, z0], [x1, y0, z0], [x1, y0, z1]],
+                [1.0, 0.0, 0.0],
+            ),
+            Face::Top => (
+                [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]],
+                [0.0, 1.0, 0.0],
+            ),
+            // Igual que en el juego: el borde de abajo de la textura toca el frente.
+            Face::Bottom => (
+                [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
+                [0.0, -1.0, 0.0],
+            ),
+        };
+        let [u0, v0, u1, v1] = uv(face);
+        let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+        let normal = apply(xf.r, normal);
+        for i in [0, 3, 2, 0, 2, 1] {
+            out.push(Vertex {
+                pos: xf.point(corners[i]),
+                uv: uvs[i],
+                normal,
+                part,
+            });
+        }
+    }
+}
+
+/// Posición en pantalla (-1..1, Y hacia arriba) de un punto del modelo, o `None` si queda
+/// detrás de la cámara.
+pub fn project(cam: &Camera, aspect: f32, p: V3) -> Option<[f32; 2]> {
+    let [x, y, z] = view_xf(cam).point(p);
+    let depth = cam.distance - z;
+    if depth <= 1.0 {
+        return None;
+    }
+    let f = 1.0 / (FOV_DEG.to_radians() / 2.0).tan();
+    Some([x * f / aspect / depth, y * f / depth])
 }
 
 /// Matriz de proyección por la traslación de la cámara, por columnas, para WGSL.
@@ -410,5 +473,23 @@ mod tests {
             top > 12.0,
             "el brazo derecho debería apuntar hacia arriba: {top}"
         );
+    }
+
+    #[test]
+    fn cape_hangs_behind() {
+        let cam = Camera {
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 70.0,
+        };
+        let v = cape(&Pose::default(), &cam);
+        assert_eq!(v.len(), 36);
+        assert!(
+            v.iter().all(|v| v.pos[2] < -1.9),
+            "la capa debe quedar detrás del torso"
+        );
+        // El centro del personaje cae en el centro de la pantalla.
+        let c = project(&cam, 1.0, CENTER).unwrap();
+        assert!(c[0].abs() < 1e-5 && c[1].abs() < 1e-5);
     }
 }

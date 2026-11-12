@@ -10,7 +10,7 @@ use crate::core::{
 use crate::render3d::Pose;
 use image::{Rgba, RgbaImage};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Tool {
     Pencil,
     Eraser,

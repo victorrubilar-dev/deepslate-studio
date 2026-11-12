@@ -4,7 +4,6 @@ mod convert;
 mod layout;
 
 pub use convert::{convert_model, from_legacy};
-#[cfg_attr(not(test), allow(unused_imports))] // Face solo lo usan las pruebas por ahora
 pub use layout::{
     FACES, Face, LAYERS, Layer, Model, PARTS, Part, Rect, face_at, mirror_pixel, rect,
 };
@@ -32,6 +31,27 @@ impl Skin {
             pixels: RgbaImage::new(SIZE, SIZE),
             model,
         }
+    }
+
+    /// Maniquí neutro para el previsualizador: cada parte de un gris distinto, sin capa exterior.
+    pub fn mannequin(model: Model) -> Self {
+        let mut s = Self::blank(model);
+        for (k, part) in PARTS.into_iter().enumerate() {
+            for face in FACES {
+                // Las caras de arriba y abajo un poco más oscuras, para que se lea el volumen.
+                let shade = if matches!(face, Face::Top | Face::Bottom) {
+                    20
+                } else {
+                    0
+                };
+                let g = 170 + (k as u8 % 2) * 20 - shade;
+                for (x, y) in rect(part, Layer::Base, face, model).pixels() {
+                    s.pixels
+                        .put_pixel(x, y, Rgba([g, g, g.saturating_add(8), 255]));
+                }
+            }
+        }
+        s
     }
 
     /// Decodifica un PNG de 64×64 o 64×32 (este último se convierte).
@@ -90,9 +110,51 @@ fn guess_model(img: &RgbaImage) -> Model {
 
 pub const TRANSPARENT: Rgba<u8> = Rgba([0, 0, 0, 0]);
 
+/// Lleva una imagen de capa de la espalda a 64×32. Acepta 64×32 y sus múltiplos
+/// (se reducen) y el formato antiguo de 22×17 (se coloca arriba a la izquierda).
+pub fn cape_texture(img: &RgbaImage) -> Option<RgbaImage> {
+    let (w, h) = img.dimensions();
+    if (w, h) == (22, 17) {
+        let mut out = RgbaImage::new(64, 32);
+        image::imageops::replace(&mut out, img, 0, 0);
+        return Some(out);
+    }
+    (w == 2 * h && w % 64 == 0)
+        .then(|| image::imageops::resize(img, 64, 32, image::imageops::FilterType::Nearest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cape_sizes() {
+        let px = Rgba([9, 9, 9, 255]);
+        let big = RgbaImage::from_pixel(128, 64, px);
+        assert_eq!(cape_texture(&big).unwrap().get_pixel(63, 31), &px);
+        let old = RgbaImage::from_pixel(22, 17, px);
+        let c = cape_texture(&old).unwrap();
+        assert_eq!(
+            (c.dimensions(), c.get_pixel(21, 16), c.get_pixel(22, 0)[3]),
+            ((64, 32), &px, 0)
+        );
+        assert!(cape_texture(&RgbaImage::new(64, 64)).is_none());
+        assert!(cape_texture(&RgbaImage::new(100, 50)).is_none());
+    }
+
+    #[test]
+    fn mannequin_is_opaque_base_only() {
+        for model in [Model::Steve, Model::Alex] {
+            let m = Skin::mannequin(model);
+            assert_eq!(m.translucent_base_pixels(), 0);
+            let overlay = rect(Part::Head, Layer::Overlay, Face::Front, model);
+            assert!(
+                overlay
+                    .pixels()
+                    .all(|(x, y)| m.pixels.get_pixel(x, y)[3] == 0)
+            );
+        }
+    }
 
     #[test]
     fn png_roundtrip() {
