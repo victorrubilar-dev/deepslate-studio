@@ -82,7 +82,7 @@ Si encuentras un error o tienes una idea, abre un *issue*.
 Hace falta Rust estable 1.95 o más nuevo ([rustup](https://rustup.rs)).
 
 ```sh
-git clone <url-del-repositorio>
+git clone https://github.com/victorrubilar-dev/deepslate-studio.git
 cd deepslate-studio
 cargo run --release
 ```
