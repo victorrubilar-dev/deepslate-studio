@@ -84,7 +84,7 @@ impl App {
 
         if self.settings != before {
             ctx.set_theme(theme_pref(self.settings.theme));
-            self.editor.set_limit(self.settings.undo_levels);
+            self.apply_undo_limit();
             self.settings_changed = true;
         }
         // Se escribe al soltar el ratón, no en cada cuadro mientras se arrastra un control.

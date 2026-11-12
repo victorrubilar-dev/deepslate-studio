@@ -199,3 +199,7 @@ settings-data-path = Camins de dades i de configuració:
 log-title = Registre
 log-refresh = Actualitza
 log-empty = El registre és buit.
+
+tab-close = Tanca la pestanya
+tab-next = Pestanya següent
+tab-prev = Pestanya anterior

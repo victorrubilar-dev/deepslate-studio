@@ -199,3 +199,7 @@ settings-data-path = Data and settings paths:
 log-title = Log
 log-refresh = Refresh
 log-empty = The log is empty.
+
+tab-close = Close tab
+tab-next = Next tab
+tab-prev = Previous tab

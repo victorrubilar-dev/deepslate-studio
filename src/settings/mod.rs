@@ -55,11 +55,17 @@ pub enum Action {
     SwapColors,
     ToggleView,
     QuickExport,
+    CloseTab,
+    NextTab,
+    PrevTab,
 }
 
-pub const ACTIONS: [Action; 23] = [
+pub const ACTIONS: [Action; 26] = [
     Action::New,
     Action::Open,
+    Action::CloseTab,
+    Action::NextTab,
+    Action::PrevTab,
     Action::Save,
     Action::SaveAs,
     Action::Export,
@@ -111,6 +117,9 @@ impl Action {
         let (ctrl, shift, key) = match self {
             Action::New => (true, false, "N"),
             Action::Open => (true, false, "O"),
+            Action::CloseTab => (true, false, "W"),
+            Action::NextTab => (true, false, "Tab"),
+            Action::PrevTab => (true, true, "Tab"),
             Action::Save => (true, false, "S"),
             Action::SaveAs => (true, true, "S"),
             Action::Export => (true, false, "E"),

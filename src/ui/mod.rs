@@ -22,9 +22,30 @@ use style::ACCENT;
 
 #[derive(Clone, Copy)]
 enum After {
-    New,
-    Open,
+    /// Cerrar la pestaña activa.
+    CloseTab,
+    /// Cerrar la ventana: se pregunta por cada pestaña con cambios.
     Close,
+}
+
+/// Una skin abierta en una pestaña. La activa vive en los campos de `App`
+/// (`editor`, `path`, `camera`, `selected`); `tabs[active]` es solo un hueco de intercambio.
+struct Doc {
+    editor: Editor,
+    path: Option<PathBuf>,
+    camera: Camera,
+    selected: Option<Part>,
+}
+
+impl Doc {
+    fn empty() -> Self {
+        Self {
+            editor: Editor::new(Skin::blank(Model::Steve), 1),
+            path: None,
+            camera: Camera::default(),
+            selected: None,
+        }
+    }
 }
 
 enum Dialog {
@@ -80,6 +101,8 @@ pub struct App {
     show_settings: bool,
     editor: Editor,
     path: Option<PathBuf>,
+    tabs: Vec<Doc>,
+    active: usize,
     tool: Tool,
     color: Hsva,
     texture: Option<TextureHandle>,
@@ -156,6 +179,8 @@ impl App {
             settings_changed: false,
             show_settings: false,
             path: None,
+            tabs: vec![Doc::empty()],
+            active: 0,
             tool: Tool::Pencil,
             color: Hsva::from_srgba_unmultiplied([196, 92, 52, 255]),
             texture: None,
@@ -203,6 +228,14 @@ impl App {
         app
     }
 
+    fn apply_undo_limit(&mut self) {
+        let n = self.settings.undo_levels;
+        self.editor.set_limit(n);
+        for d in &mut self.tabs {
+            d.editor.set_limit(n);
+        }
+    }
+
     fn set_project(&mut self, project: Project, path: Option<PathBuf>) {
         self.editor = Editor::new(project.skin, self.settings.undo_levels);
         self.editor.set_pose(project.pose);
@@ -215,6 +248,11 @@ impl App {
     // ---- Archivo ----
 
     fn request(&mut self, ctx: &egui::Context, after: After) {
+        if let After::Close = after
+            && let Some(i) = (0..self.tabs.len()).find(|&i| self.tab_dirty(i))
+        {
+            self.switch_tab(i);
+        }
         if self.editor.is_dirty() {
             self.dialog = Some(Dialog::Discard(after));
         } else {
@@ -224,18 +262,130 @@ impl App {
 
     fn run(&mut self, ctx: &egui::Context, after: After) {
         match after {
-            After::New => self.set_project(
-                Project {
-                    skin: Skin::blank(Model::Steve),
-                    pose: Default::default(),
-                },
-                None,
-            ),
-            After::Open => self.open(),
+            After::CloseTab => self.close_tab(),
+            After::Close if (0..self.tabs.len()).any(|i| self.tab_dirty(i)) => {
+                // Esta pestaña ya se guardó o se descartó; se pasa a la siguiente con cambios.
+                self.close_tab();
+                self.request(ctx, After::Close);
+            }
             After::Close => {
                 self.closing = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+        }
+    }
+
+    // ---- Pestañas ----
+
+    /// Intercambia la pestaña activa entre los campos de `App` y su hueco en `tabs`.
+    fn swap_active(&mut self) {
+        let d = &mut self.tabs[self.active];
+        std::mem::swap(&mut self.editor, &mut d.editor);
+        std::mem::swap(&mut self.path, &mut d.path);
+        std::mem::swap(&mut self.camera, &mut d.camera);
+        std::mem::swap(&mut self.selected, &mut d.selected);
+    }
+
+    fn tab_dirty(&self, i: usize) -> bool {
+        if i == self.active {
+            self.editor.is_dirty()
+        } else {
+            self.tabs[i].editor.is_dirty()
+        }
+    }
+
+    fn tab_path(&self, i: usize) -> Option<&Path> {
+        if i == self.active {
+            self.path.as_deref()
+        } else {
+            self.tabs[i].path.as_deref()
+        }
+    }
+
+    fn switch_tab(&mut self, i: usize) {
+        if i == self.active || i >= self.tabs.len() {
+            return;
+        }
+        if self.painting {
+            self.editor.end_stroke();
+            self.painting = false;
+        }
+        self.swap_active();
+        self.active = i;
+        self.swap_active();
+        self.texture_rev = None;
+        self.uploaded = None;
+    }
+
+    fn new_tab(&mut self, project: Project, path: Option<PathBuf>) {
+        self.tabs.push(Doc::empty());
+        self.switch_tab(self.tabs.len() - 1);
+        self.set_project(project, path);
+    }
+
+    /// Cierra la pestaña activa sin preguntar. La última se reemplaza por una vacía.
+    fn close_tab(&mut self) {
+        if self.tabs.len() == 1 {
+            self.set_project(blank_project(), None);
+            return;
+        }
+        self.tabs.remove(self.active);
+        self.active = self.active.min(self.tabs.len() - 1);
+        self.swap_active();
+        // El hueco quedó con la pestaña cerrada; se libera su historial.
+        self.tabs[self.active] = Doc::empty();
+        self.texture_rev = None;
+        self.uploaded = None;
+    }
+
+    /// Una pestaña sin archivo, sin cambios y sin historial: se puede reutilizar al abrir.
+    fn active_is_untouched(&self) -> bool {
+        self.path.is_none() && !self.editor.is_dirty() && !self.editor.can_undo()
+    }
+
+    fn tab_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut switch = None;
+        let mut close = None;
+        ui.horizontal_wrapped(|ui| {
+            for i in 0..self.tabs.len() {
+                let name = self
+                    .tab_path(i)
+                    .map_or_else(|| self.i18n.tr("untitled"), file_name);
+                let label = if self.tab_dirty(i) {
+                    format!("{name} •")
+                } else {
+                    name
+                };
+                let tab = ui.selectable_label(i == self.active, label);
+                if tab.clicked() {
+                    switch = Some(i);
+                }
+                if tab.middle_clicked() {
+                    close = Some(i);
+                }
+                if ui
+                    .small_button("×")
+                    .on_hover_text(self.i18n.tr("tab-close"))
+                    .clicked()
+                {
+                    close = Some(i);
+                }
+                ui.separator();
+            }
+            if ui
+                .small_button("+")
+                .on_hover_text(self.i18n.tr("file-new"))
+                .clicked()
+            {
+                self.new_tab(blank_project(), None);
+            }
+        });
+        if let Some(i) = switch {
+            self.switch_tab(i);
+        }
+        if let Some(i) = close {
+            self.switch_tab(i);
+            self.request(ctx, After::CloseTab);
         }
     }
 
@@ -246,6 +396,9 @@ impl App {
     }
 
     fn open_path(&mut self, path: PathBuf) {
+        if let Some(i) = (0..self.tabs.len()).find(|&i| self.tab_path(i) == Some(path.as_path())) {
+            return self.switch_tab(i);
+        }
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
@@ -267,7 +420,12 @@ impl App {
                 self.status = self.i18n.tr_args(key, &[("file", file_name(&path).into())]);
                 log::info!("abierto {}", path.display());
                 self.remember_file(&path);
-                self.set_project(project, is_project.then_some(path));
+                let path = is_project.then_some(path);
+                if self.active_is_untouched() {
+                    self.set_project(project, path);
+                } else {
+                    self.new_tab(project, path);
+                }
             }
             Err(e) => self.error(self.load_error(e)),
         }
@@ -392,13 +550,18 @@ impl App {
         if now - self.last_autosave < period {
             return;
         }
-        if self.editor.is_dirty()
-            && self.path.is_some()
-            && self.dialog.is_none()
-            && !self.painting
-            && self.save(false)
-        {
-            log::info!("autoguardado");
+        if self.dialog.is_none() && !self.painting {
+            for d in &mut self.tabs {
+                if let (true, Some(path)) = (d.editor.is_dirty(), &d.path) {
+                    match std::fs::write(path, project::save(d.editor.skin(), d.editor.pose())) {
+                        Ok(()) => d.editor.mark_saved(),
+                        Err(e) => log::error!("autoguardado de {}: {e}", path.display()),
+                    }
+                }
+            }
+            if self.editor.is_dirty() && self.path.is_some() && self.save(false) {
+                log::info!("autoguardado");
+            }
         }
         self.last_autosave = now;
     }
@@ -440,8 +603,13 @@ impl App {
 
     fn act(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::New => self.request(ctx, After::New),
-            Action::Open => self.request(ctx, After::Open),
+            Action::New => self.new_tab(blank_project(), None),
+            Action::Open => self.open(),
+            Action::CloseTab => self.request(ctx, After::CloseTab),
+            Action::NextTab => self.switch_tab((self.active + 1) % self.tabs.len()),
+            Action::PrevTab => {
+                self.switch_tab((self.active + self.tabs.len() - 1) % self.tabs.len())
+            }
             Action::Save => {
                 self.save(false);
             }
@@ -527,10 +695,12 @@ impl App {
     }
 
     fn handle_close(&mut self, ctx: &egui::Context) {
-        if ctx.input(|i| i.viewport().close_requested()) && !self.closing && self.editor.is_dirty()
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.closing
+            && (0..self.tabs.len()).any(|i| self.tab_dirty(i))
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.dialog = Some(Dialog::Discard(After::Close));
+            self.request(ctx, After::Close);
         }
     }
 
@@ -541,6 +711,7 @@ impl App {
             ui.menu_button(self.i18n.tr("menu-file"), |ui| {
                 self.menu_item(ui, Action::New);
                 self.menu_item(ui, Action::Open);
+                self.menu_item(ui, Action::CloseTab);
                 ui.separator();
                 self.menu_item(ui, Action::Save);
                 self.menu_item(ui, Action::SaveAs);
@@ -1626,7 +1797,7 @@ impl App {
             (Dialog::ResetSettings, Choice::Accept) => {
                 self.settings.reset();
                 ctx.set_theme(theme_pref(self.settings.theme));
-                self.editor.set_limit(self.settings.undo_levels);
+                self.apply_undo_limit();
                 self.settings_changed = true;
             }
             (Dialog::CopyParts(mask), Choice::Accept) => {
@@ -1655,6 +1826,7 @@ impl eframe::App for App {
         self.shortcuts(&ctx);
         self.autosave(&ctx);
         egui::Panel::top("menu").show(ui, |ui| self.menu(ui));
+        egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui, &ctx));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         egui::Panel::left("tools")
             .default_size(260.0)
@@ -1729,6 +1901,13 @@ fn shortcut_label(i: &I18n, sc: &Shortcut) -> String {
     parts.join("+")
 }
 
+fn blank_project() -> Project {
+    Project {
+        skin: Skin::blank(Model::Steve),
+        pose: Default::default(),
+    }
+}
+
 fn action_name(i: &I18n, a: Action) -> String {
     match a {
         Action::New => i.tr("file-new"),
@@ -1754,6 +1933,9 @@ fn action_name(i: &I18n, a: Action) -> String {
         Action::ToggleMirror => i.tr("action-toggle-mirror"),
         Action::SwapColors => i.tr("action-swap-colors"),
         Action::ToggleView => i.tr("action-toggle-view"),
+        Action::CloseTab => i.tr("tab-close"),
+        Action::NextTab => i.tr("tab-next"),
+        Action::PrevTab => i.tr("tab-prev"),
     }
 }
 

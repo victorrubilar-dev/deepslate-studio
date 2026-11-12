@@ -200,3 +200,7 @@ settings-data-path = Rutas de datos y de ajustes:
 log-title = Registro
 log-refresh = Actualizar
 log-empty = El registro está vacío.
+
+tab-close = Cerrar pestaña
+tab-next = Pestaña siguiente
+tab-prev = Pestaña anterior

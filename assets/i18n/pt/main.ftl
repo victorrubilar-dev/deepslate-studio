@@ -199,3 +199,7 @@ settings-data-path = Caminhos de dados e configurações:
 log-title = Registro
 log-refresh = Atualizar
 log-empty = O registro está vazio.
+
+tab-close = Fechar aba
+tab-next = Próxima aba
+tab-prev = Aba anterior
