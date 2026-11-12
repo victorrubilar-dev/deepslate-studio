@@ -272,41 +272,14 @@ pub fn cape(pose: &Pose, cam: &Camera) -> Vec<Vertex> {
 /// Agrega las 6 caras de una caja. `uv` da (u0, v0, u1, v1) de cada cara.
 fn cuboid(
     out: &mut Vec<Vertex>,
-    [x0, y0, z0]: V3,
-    [x1, y1, z1]: V3,
+    min: V3,
+    max: V3,
     xf: &Xf,
     part: f32,
     uv: impl Fn(Face) -> [f32; 4],
 ) {
     for face in crate::core::FACES {
-        // Esquinas vistas desde fuera: arriba-izq, arriba-der, abajo-der, abajo-izq.
-        let (corners, normal): ([V3; 4], V3) = match face {
-            Face::Front => (
-                [[x0, y1, z1], [x1, y1, z1], [x1, y0, z1], [x0, y0, z1]],
-                [0.0, 0.0, 1.0],
-            ),
-            Face::Back => (
-                [[x1, y1, z0], [x0, y1, z0], [x0, y0, z0], [x1, y0, z0]],
-                [0.0, 0.0, -1.0],
-            ),
-            Face::Right => (
-                [[x0, y1, z0], [x0, y1, z1], [x0, y0, z1], [x0, y0, z0]],
-                [-1.0, 0.0, 0.0],
-            ),
-            Face::Left => (
-                [[x1, y1, z1], [x1, y1, z0], [x1, y0, z0], [x1, y0, z1]],
-                [1.0, 0.0, 0.0],
-            ),
-            Face::Top => (
-                [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]],
-                [0.0, 1.0, 0.0],
-            ),
-            // Igual que en el juego: el borde de abajo de la textura toca el frente.
-            Face::Bottom => (
-                [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
-                [0.0, -1.0, 0.0],
-            ),
-        };
+        let (corners, normal) = face_corners(face, min, max);
         let [u0, v0, u1, v1] = uv(face);
         let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
         let normal = apply(xf.r, normal);
@@ -321,10 +294,46 @@ fn cuboid(
     }
 }
 
+/// Esquinas de una cara vistas desde fuera (arriba-izq, arriba-der, abajo-der, abajo-izq)
+/// y su normal. La primera esquina es la (u0, v0) de la textura.
+fn face_corners(face: Face, [x0, y0, z0]: V3, [x1, y1, z1]: V3) -> ([V3; 4], V3) {
+    match face {
+        Face::Front => (
+            [[x0, y1, z1], [x1, y1, z1], [x1, y0, z1], [x0, y0, z1]],
+            [0.0, 0.0, 1.0],
+        ),
+        Face::Back => (
+            [[x1, y1, z0], [x0, y1, z0], [x0, y0, z0], [x1, y0, z0]],
+            [0.0, 0.0, -1.0],
+        ),
+        Face::Right => (
+            [[x0, y1, z0], [x0, y1, z1], [x0, y0, z1], [x0, y0, z0]],
+            [-1.0, 0.0, 0.0],
+        ),
+        Face::Left => (
+            [[x1, y1, z1], [x1, y1, z0], [x1, y0, z0], [x1, y0, z1]],
+            [1.0, 0.0, 0.0],
+        ),
+        Face::Top => (
+            [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]],
+            [0.0, 1.0, 0.0],
+        ),
+        // Igual que en el juego: el borde de abajo de la textura toca el frente.
+        Face::Bottom => (
+            [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]],
+            [0.0, -1.0, 0.0],
+        ),
+    }
+}
+
 /// Posición en pantalla (-1..1, Y hacia arriba) de un punto del modelo, o `None` si queda
 /// detrás de la cámara.
 pub fn project(cam: &Camera, aspect: f32, p: V3) -> Option<[f32; 2]> {
-    let [x, y, z] = view_xf(cam).point(p);
+    to_screen(cam, aspect, view_xf(cam).point(p))
+}
+
+/// Como `project`, pero para un punto que ya está en espacio de cámara.
+fn to_screen(cam: &Camera, aspect: f32, [x, y, z]: V3) -> Option<[f32; 2]> {
     let depth = cam.distance - z;
     if depth <= 1.0 {
         return None;
@@ -347,40 +356,92 @@ pub fn projection(aspect: f32, cam: &Camera) -> [[f32; 4]; 4] {
     ]
 }
 
-/// Parte bajo el punto (nx, ny) en coordenadas normalizadas (-1..1, Y hacia arriba).
+fn dot(a: V3, b: V3) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn lerp3(a: V3, d: V3, t: f32) -> V3 {
+    [a[0] + d[0] * t, a[1] + d[1] * t, a[2] + d[2] * t]
+}
+
+/// Lo que hay bajo el cursor en la vista 3D.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    pub part: Part,
+    pub layer: Layer,
+    pub face: Face,
+    /// Píxel de la textura.
+    pub x: u32,
+    pub y: u32,
+    /// Esquinas de ese píxel en pantalla (-1..1, Y hacia arriba), para resaltarlo.
+    pub quad: [[f32; 2]; 4],
+}
+
+/// Píxel bajo el punto (nx, ny) en coordenadas normalizadas (-1..1, Y hacia arriba).
+/// Se queda con el más cercano para el que `solid(parte, capa, x, y)` es verdadero;
+/// así un píxel transparente de la capa exterior deja ver lo que hay detrás.
 pub fn pick(
     model: Model,
     pose: &Pose,
     cam: &Camera,
     visible: &dyn Fn(Part, Layer) -> bool,
+    solid: &dyn Fn(Part, Layer, u32, u32) -> bool,
     aspect: f32,
     (nx, ny): (f32, f32),
-) -> Option<Part> {
+) -> Option<Hit> {
     let h = (FOV_DEG.to_radians() / 2.0).tan();
     let origin = [0.0, 0.0, cam.distance];
     let dir = [nx * h * aspect, ny * h, -1.0];
-    let mut best: Option<(f32, Part)> = None;
+    let mut best: Option<(f32, Hit)> = None;
     for b in boxes(model, pose, cam, visible) {
         let inv = transpose(b.xf.r);
         let o = apply(inv, sub(origin, b.xf.t));
         let d = apply(inv, dir);
-        let (mut t0, mut t1) = (f32::NEG_INFINITY, f32::INFINITY);
-        for k in 0..3 {
-            if d[k].abs() < 1e-9 {
-                if o[k] < b.min[k] || o[k] > b.max[k] {
-                    t1 = f32::NEG_INFINITY;
-                }
+        for face in crate::core::FACES {
+            let (c, n) = face_corners(face, b.min, b.max);
+            let dn = dot(n, d);
+            // Solo las caras que miran a la cámara.
+            if dn >= 0.0 {
                 continue;
             }
-            let (a, c) = ((b.min[k] - o[k]) / d[k], (b.max[k] - o[k]) / d[k]);
-            t0 = t0.max(a.min(c));
-            t1 = t1.min(a.max(c));
-        }
-        if t0 <= t1 && t1 > 0.0 && best.is_none_or(|(t, _)| t0 < t) {
-            best = Some((t0, b.part));
+            let t = dot(n, sub(c[0], o)) / dn;
+            if t <= 0.0 || best.is_some_and(|(bt, _)| bt <= t) {
+                continue;
+            }
+            let (eu, ev) = (sub(c[1], c[0]), sub(c[3], c[0]));
+            let rel = sub(lerp3(o, d, t), c[0]);
+            let (s, v) = (dot(rel, eu) / dot(eu, eu), dot(rel, ev) / dot(ev, ev));
+            if !(0.0..=1.0).contains(&s) || !(0.0..=1.0).contains(&v) {
+                continue;
+            }
+            let r = rect(b.part, b.layer, face, model);
+            let i = ((s * r.w as f32) as u32).min(r.w - 1);
+            let j = ((v * r.h as f32) as u32).min(r.h - 1);
+            let (x, y) = (r.x + i, r.y + j);
+            if !solid(b.part, b.layer, x, y) {
+                continue;
+            }
+            let corner = |di: u32, dj: u32| {
+                let p = lerp3(
+                    lerp3(c[0], eu, (i + di) as f32 / r.w as f32),
+                    ev,
+                    (j + dj) as f32 / r.h as f32,
+                );
+                to_screen(cam, aspect, b.xf.point(p)).unwrap_or([nx, ny])
+            };
+            let quad = [corner(0, 0), corner(1, 0), corner(1, 1), corner(0, 1)];
+            let hit = Hit {
+                part: b.part,
+                layer: b.layer,
+                face,
+                x,
+                y,
+                quad,
+            };
+            best = Some((t, hit));
         }
     }
-    best.map(|(_, p)| p)
+    best.map(|(_, h)| h)
 }
 
 #[cfg(test)]
@@ -441,7 +502,16 @@ mod tests {
             distance: 70.0,
         };
         let pick_at = |p, vis: &dyn Fn(Part, Layer) -> bool| {
-            pick(Model::Steve, &Pose::default(), &cam, vis, 1.0, p)
+            pick(
+                Model::Steve,
+                &Pose::default(),
+                &cam,
+                vis,
+                &|_, _, _, _| true,
+                1.0,
+                p,
+            )
+            .map(|h| h.part)
         };
         assert_eq!(pick_at((0.0, 0.0), &all), Some(Part::Body));
         assert_eq!(pick_at((0.0, 0.9), &all), None);
@@ -450,6 +520,55 @@ mod tests {
         assert_eq!(pick_at((0.0, ny), &all), Some(Part::Head));
         // Lo oculto no se puede seleccionar.
         assert_eq!(pick_at((0.0, 0.0), &|p, _| p != Part::Body), None);
+    }
+
+    #[test]
+    fn picks_the_texel() {
+        let cam = Camera {
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 70.0,
+        };
+        // Apunta al punto (-1.5, 29.5) del frente de la cabeza base (z = 4, a 66 de la cámara).
+        let h = (FOV_DEG.to_radians() / 2.0).tan();
+        let p = (-1.5 / 66.0 / h, (29.5 - 16.0) / 66.0 / h);
+        let at = |solid: &dyn Fn(Part, Layer, u32, u32) -> bool| {
+            let hit = pick(Model::Steve, &Pose::default(), &cam, &all, solid, 1.0, p).unwrap();
+            (hit.part, hit.layer, hit.face, hit.x, hit.y)
+        };
+        // Frente de la cabeza: base en (8, 8), capa exterior en (40, 8). Columna 2, fila 2.
+        let base = (Part::Head, Layer::Base, Face::Front, 10, 10);
+        assert_eq!(at(&|_, l, _, _| l == Layer::Base), base);
+        assert_eq!(
+            at(&|_, _, _, _| true),
+            (Part::Head, Layer::Overlay, Face::Front, 42, 10)
+        );
+        // Un píxel transparente de la capa exterior deja ver la base.
+        assert_eq!(at(&|_, l, x, _| l == Layer::Base || x != 42), base);
+    }
+
+    #[test]
+    fn picks_side_faces() {
+        // Mirando desde el lado izquierdo del personaje (+X) se ve la cara Left del brazo izquierdo.
+        let cam = Camera {
+            yaw: -90.0,
+            pitch: 0.0,
+            distance: 70.0,
+        };
+        let only_base = |_: Part, l: Layer, _: u32, _: u32| l == Layer::Base;
+        let hit = pick(
+            Model::Steve,
+            &Pose::default(),
+            &cam,
+            &all,
+            &only_base,
+            1.0,
+            (0.0, 0.1),
+        )
+        .unwrap();
+        assert_eq!((hit.part, hit.face), (Part::LeftArm, Face::Left));
+        let r = rect(Part::LeftArm, Layer::Base, Face::Left, Model::Steve);
+        assert!(r.contains(hit.x, hit.y), "{hit:?}");
     }
 
     #[test]

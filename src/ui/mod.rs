@@ -9,11 +9,11 @@ use crate::editor::colors::{palette_from, parse_hex, to_hex};
 use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
 use crate::project::{self, Project, ProjectError};
-use crate::render3d::{Camera, PRESETS, Preset, Renderer3d, Scene, pick, project};
+use crate::render3d::{Camera, Hit, PRESETS, Preset, Renderer3d, Scene, pick, project};
 use crate::settings::{Action, NamedColor, Settings, Shortcut, StartView, Theme, View};
 use eframe::egui::{
-    self, Color32, ColorImage, Key, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle,
-    TextureOptions, Vec2, color_picker, ecolor::Hsva,
+    self, Color32, ColorImage, Key, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind,
+    TextureHandle, TextureOptions, Vec2, color_picker, ecolor::Hsva,
 };
 use image::{Rgba, RgbaImage};
 use std::path::{Path, PathBuf};
@@ -85,6 +85,11 @@ pub struct App {
     preview: Option<TextureHandle>,
     painting: bool,
     last_px: Option<(u32, u32)>,
+    /// Trazo en la vista 3D: último píxel pintado, última posición del cursor y la skin
+    /// al empezar (decide qué es transparente, para no atravesar lo que se va borrando).
+    last_hit: Option<Hit>,
+    last_pos3d: Option<Pos2>,
+    stroke_start: Option<RgbaImage>,
     dialog: Option<Dialog>,
     status: String,
     closing: bool,
@@ -154,6 +159,9 @@ impl App {
             preview: None,
             painting: false,
             last_px: None,
+            last_hit: None,
+            last_pos3d: None,
+            stroke_start: None,
             dialog: None,
             status: String::new(),
             closing: false,
@@ -1002,7 +1010,11 @@ impl App {
         }
         self.sync_3d(preview);
         let (area, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
-        if resp.dragged() {
+        // En el editor el botón izquierdo pinta; se gira con el derecho o la rueda presionada.
+        let rotating = resp.dragged_by(PointerButton::Secondary)
+            || resp.dragged_by(PointerButton::Middle)
+            || (preview && resp.dragged_by(PointerButton::Primary));
+        if rotating {
             let d = resp.drag_delta() * 0.5 * self.settings.rotate_speed;
             self.camera.yaw += d.x;
             self.camera.pitch = (self.camera.pitch + d.y).clamp(-89.0, 89.0);
@@ -1036,24 +1048,14 @@ impl App {
                 ));
             }
         }
+        let hover = if preview {
+            None
+        } else {
+            self.paint_3d(ui, &resp, area)
+        };
         let model = self.model_3d(preview);
         let editor = &self.editor;
         let visible = |p, l| preview || editor.is_visible(p, l);
-        if !preview
-            && resp.clicked()
-            && let Some(pos) = resp.interact_pointer_pos()
-        {
-            let nx = (pos.x - area.min.x) / area.width() * 2.0 - 1.0;
-            let ny = 1.0 - (pos.y - area.min.y) / area.height() * 2.0;
-            self.selected = pick(
-                model,
-                editor.pose(),
-                &self.camera,
-                &visible,
-                aspect,
-                (nx, ny),
-            );
-        }
         let scene = Scene {
             model,
             pose: editor.pose(),
@@ -1076,9 +1078,127 @@ impl App {
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
         );
-        if !preview {
+        if let Some(h) = hover {
+            let pts: Vec<Pos2> = h
+                .quad
+                .iter()
+                .map(|&[nx, ny]| {
+                    area.center() + Vec2::new(nx * area.width(), -ny * area.height()) / 2.0
+                })
+                .collect();
+            painter.add(egui::Shape::closed_line(
+                pts.clone(),
+                Stroke::new(3.0, Color32::BLACK),
+            ));
+            painter.add(egui::Shape::closed_line(
+                pts,
+                Stroke::new(1.5, Color32::WHITE),
+            ));
+        }
+        if !preview && !self.painting {
             resp.on_hover_text(self.i18n.tr("view3d-hint"));
         }
+    }
+
+    /// Píxel de la skin bajo `pos` en la vista 3D del editor. Durante un trazo, lo transparente
+    /// se decide con la skin de cuando empezó.
+    fn hit_3d(&self, area: Rect, pos: Pos2) -> Option<Hit> {
+        let editor = &self.editor;
+        let pixels = match (&self.stroke_start, self.painting) {
+            (Some(start), true) => start,
+            _ => &editor.skin().pixels,
+        };
+        // La capa exterior transparente se atraviesa, salvo con la base oculta: así se puede
+        // pintar la capa exterior ocultando la base.
+        let solid = |p, l, x, y| {
+            l == Layer::Base || pixels.get_pixel(x, y)[3] > 0 || !editor.is_visible(p, Layer::Base)
+        };
+        pick(
+            editor.skin().model,
+            editor.pose(),
+            &self.camera,
+            &|p, l| editor.is_visible(p, l),
+            &solid,
+            area.width() / area.height().max(1.0),
+            (
+                (pos.x - area.min.x) / area.width() * 2.0 - 1.0,
+                1.0 - (pos.y - area.min.y) / area.height() * 2.0,
+            ),
+        )
+    }
+
+    /// Clic izquierdo en la vista 3D: selecciona la parte y usa la herramienta activa.
+    /// Devuelve el píxel a resaltar bajo el cursor.
+    fn paint_3d(&mut self, ui: &egui::Ui, resp: &egui::Response, area: Rect) -> Option<Hit> {
+        let hover = resp.hover_pos().and_then(|p| self.hit_3d(area, p));
+        let pressed = resp.hovered() && ui.input(|i| i.pointer.primary_pressed());
+        if pressed {
+            self.selected = hover.map(|h| h.part);
+        }
+        self.sync_mirror();
+        match self.tool {
+            Tool::Pencil | Tool::Eraser => {
+                let down =
+                    resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
+                if down && !self.painting {
+                    self.editor.begin_stroke();
+                    self.painting = true;
+                    self.stroke_start = Some(self.editor.skin().pixels.clone());
+                    self.last_hit = None;
+                    self.last_pos3d = None;
+                    if self.tool == Tool::Pencil {
+                        self.remember(self.primary());
+                    }
+                }
+                if self.painting && !down {
+                    self.editor.end_stroke();
+                    self.painting = false;
+                    self.stroke_start = None;
+                }
+                if !self.painting {
+                    return hover;
+                }
+                let color = if self.tool == Tool::Eraser {
+                    ERASE
+                } else {
+                    self.primary()
+                };
+                let Some(pos) = resp.interact_pointer_pos() else {
+                    return hover;
+                };
+                // Se recorre el tramo en pantalla, no en la textura: un trazo puede pasar de una
+                // cara a otra que en la textura está lejos.
+                let from = self.last_pos3d.unwrap_or(pos);
+                let steps = ((pos - from).length() / 2.0).ceil().max(1.0) as usize;
+                for k in 1..=steps {
+                    let hit = self.hit_3d(area, from.lerp(pos, k as f32 / steps as f32));
+                    if let Some(h) = hit {
+                        let start = self
+                            .last_hit
+                            .filter(|l| (l.part, l.layer, l.face) == (h.part, h.layer, h.face))
+                            .map_or((h.x, h.y), |l| (l.x, l.y));
+                        self.editor.paint_line(start, (h.x, h.y), color);
+                    }
+                    self.last_hit = hit;
+                }
+                self.last_pos3d = Some(pos);
+            }
+            Tool::Fill => {
+                if let (true, Some(h)) = (resp.clicked(), hover) {
+                    let c = self.primary();
+                    self.editor.fill(h.x, h.y, c);
+                    self.remember(c);
+                }
+            }
+            Tool::Picker => {
+                if let (true, Some(h)) = (resp.clicked(), hover) {
+                    self.color = Hsva::from_srgba_unmultiplied(self.editor.pick(h.x, h.y).0);
+                }
+            }
+            // Degradado, sello y selección solo tienen sentido en 2D.
+            Tool::Gradient | Tool::Stamp | Tool::Select => return None,
+        }
+        hover
     }
 
     fn capture(&mut self) {
@@ -1255,17 +1375,21 @@ impl App {
         self.settings_changed = true;
     }
 
+    fn sync_mirror(&mut self) {
+        self.editor.set_mirror(match self.mirror {
+            MirrorMode::Off => Mirror::Off,
+            MirrorMode::All => Mirror::All,
+            MirrorMode::Selected => self.selected.map_or(Mirror::Off, Mirror::Part),
+        });
+    }
+
     fn handle_canvas_input(
         &mut self,
         resp: &egui::Response,
         at: Option<(u32, u32)>,
         clamped: Option<(u32, u32)>,
     ) {
-        self.editor.set_mirror(match self.mirror {
-            MirrorMode::Off => Mirror::Off,
-            MirrorMode::All => Mirror::All,
-            MirrorMode::Selected => self.selected.map_or(Mirror::Off, Mirror::Part),
-        });
+        self.sync_mirror();
         match self.tool {
             Tool::Pencil | Tool::Eraser => {
                 let down = resp.is_pointer_button_down_on()

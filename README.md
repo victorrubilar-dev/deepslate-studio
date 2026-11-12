@@ -12,7 +12,7 @@
 
 ### Edición
 - **Lienzo 2D:** la textura desplegada, editable píxel a píxel, con cuadrícula opcional y el nombre de cada parte.
-- **Vista 3D en vivo:** el personaje se actualiza mientras pintas. Se gira arrastrando, se acerca con la rueda y cada parte se selecciona con un clic.
+- **Pintar en 3D:** el lápiz, el borrador, el bote y el cuentagotas también funcionan sobre el personaje en 3D, con el píxel bajo el cursor resaltado. Se gira con el botón derecho y se acerca con la rueda.
 - **Herramientas:** lápiz, borrador, bote de pintura, cuentagotas, degradado, sello y selección rectangular.
 - **Espejo:** lo que pintas en un brazo o una pierna se copia al lado opuesto. Funciona para todo el cuerpo o solo para la parte elegida.
 - **Capas:** capa base y capa exterior. Cada parte y cada capa se puede mostrar u ocultar por separado.
