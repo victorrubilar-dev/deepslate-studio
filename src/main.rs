@@ -23,6 +23,14 @@ fn icon() -> eframe::egui::IconData {
 }
 
 fn main() -> eframe::Result {
+    // winit 0.30 no recibe archivos arrastrados en Wayland. Si hay XWayland, se abre con X11
+    // para que arrastrar y soltar funcione.
+    // shortcut: sacar esto cuando winit soporte arrastrar y soltar en Wayland.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        // SAFETY: es lo primero de `main`, antes de crear cualquier hilo.
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    }
     if let Some(p) = settings::log::path() {
         settings::log::init(&p);
     }
