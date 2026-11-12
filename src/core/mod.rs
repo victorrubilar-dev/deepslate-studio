@@ -5,7 +5,9 @@ mod layout;
 
 pub use convert::{convert_model, from_legacy};
 #[cfg_attr(not(test), allow(unused_imports))] // Face solo lo usan las pruebas por ahora
-pub use layout::{FACES, Face, LAYERS, Layer, Model, PARTS, Part, Rect, face_at, rect};
+pub use layout::{
+    FACES, Face, LAYERS, Layer, Model, PARTS, Part, Rect, face_at, mirror_pixel, rect,
+};
 
 use image::{Rgba, RgbaImage};
 

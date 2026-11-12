@@ -1,9 +1,14 @@
 //! Herramientas y pila de deshacer. La interfaz solo cambia la skin a través de `Editor`.
 //! Cada paso de deshacer guarda la skin entera: son 16 KB y evita errores de diferencias.
 
-use crate::core::{Layer, Part, Skin, TRANSPARENT, face_at, rect};
+pub mod colors;
+
+use crate::core::{
+    FACES, LAYERS, Layer, PARTS, Part, Rect, Skin, TRANSPARENT, convert_model, face_at,
+    mirror_pixel, rect,
+};
 use crate::render3d::Pose;
-use image::Rgba;
+use image::{Rgba, RgbaImage};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -11,7 +16,21 @@ pub enum Tool {
     Eraser,
     Fill,
     Picker,
+    Gradient,
+    Stamp,
+    Select,
 }
+
+/// Pintar en espejo: nada, todo el personaje, o solo cuando se pinta en esa parte o en su pareja.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mirror {
+    Off,
+    All,
+    Part(Part),
+}
+
+/// Qué partes y capas entran al copiar o pegar, indexado por `[parte][capa]`.
+pub type PartMask = [[bool; 2]; 6];
 
 pub struct Editor {
     skin: Skin,
@@ -25,6 +44,9 @@ pub struct Editor {
     visible: [[bool; 2]; 6],
     /// Se guarda con el proyecto; cambiarla deja cambios sin guardar, pero no entra en deshacer.
     pose: Pose,
+    /// Si hay selección, solo se puede pintar dentro de ella.
+    selection: Option<Rect>,
+    mirror: Mirror,
 }
 
 impl Editor {
@@ -39,6 +61,8 @@ impl Editor {
             saved_revision: 0,
             visible: [[true; 2]; 6],
             pose: Pose::default(),
+            selection: None,
+            mirror: Mirror::Off,
         }
     }
 
@@ -86,7 +110,34 @@ impl Editor {
     }
 
     pub fn editable(&self, x: u32, y: u32) -> bool {
-        matches!(face_at(self.skin.model, x, y), Some((p, l, _)) if self.is_visible(p, l))
+        self.selection.is_none_or(|r| r.contains(x, y))
+            && matches!(face_at(self.skin.model, x, y), Some((p, l, _)) if self.is_visible(p, l))
+    }
+
+    pub fn selection(&self) -> Option<Rect> {
+        self.selection
+    }
+
+    /// No cambia la skin, así que no entra en deshacer.
+    pub fn set_selection(&mut self, r: Option<Rect>) {
+        self.selection = r.filter(|r| r.w > 0 && r.h > 0);
+    }
+
+    pub fn set_mirror(&mut self, m: Mirror) {
+        self.mirror = m;
+    }
+
+    /// El píxel simétrico de (x, y) si el espejo está activo para ese punto.
+    fn mirrored(&self, x: u32, y: u32) -> Option<(u32, u32)> {
+        let model = self.skin.model;
+        let applies = match self.mirror {
+            Mirror::Off => false,
+            Mirror::All => true,
+            Mirror::Part(p) => {
+                matches!(face_at(model, x, y), Some((q, _, _)) if q == p || q == p.mirrored())
+            }
+        };
+        applies.then(|| mirror_pixel(model, x, y)).flatten()
     }
 
     pub fn can_undo(&self) -> bool {
@@ -105,10 +156,27 @@ impl Editor {
     pub fn paint_line(&mut self, from: (u32, u32), to: (u32, u32), color: Rgba<u8>) {
         debug_assert!(self.stroke.is_some(), "paint_line fuera de un trazo");
         for (x, y) in line(from, to) {
-            if self.editable(x, y) && *self.skin.pixels.get_pixel(x, y) != color {
-                self.skin.pixels.put_pixel(x, y, color);
-                self.revision += 1;
+            self.put(x, y, color);
+            if let Some((mx, my)) = self.mirrored(x, y) {
+                self.put(mx, my, color);
             }
+        }
+    }
+
+    fn put(&mut self, x: u32, y: u32, color: Rgba<u8>) {
+        if self.editable(x, y) && *self.skin.pixels.get_pixel(x, y) != color {
+            self.skin.pixels.put_pixel(x, y, color);
+            self.revision += 1;
+        }
+    }
+
+    /// Ejecuta `f` y, si cambió la skin, lo registra como un solo paso de deshacer.
+    fn step(&mut self, f: impl FnOnce(&mut Self)) {
+        let before = self.skin.clone();
+        f(self);
+        if before != self.skin {
+            self.revision += 1;
+            self.push_undo(before);
         }
     }
 
@@ -120,8 +188,18 @@ impl Editor {
         }
     }
 
-    /// Rellena el área del mismo color, sin salir de la cara donde se hizo clic.
+    /// Rellena el área del mismo color, sin salir de la cara donde se hizo clic
+    /// (ni de la selección, si la hay).
     pub fn fill(&mut self, x: u32, y: u32, color: Rgba<u8>) {
+        self.step(|e| {
+            e.flood(x, y, color);
+            if let Some((mx, my)) = e.mirrored(x, y) {
+                e.flood(mx, my, color);
+            }
+        });
+    }
+
+    fn flood(&mut self, x: u32, y: u32, color: Rgba<u8>) {
         if !self.editable(x, y) {
             return;
         }
@@ -133,10 +211,12 @@ impl Editor {
         if target == color {
             return;
         }
-        let before = self.skin.clone();
         let mut stack = vec![(x, y)];
         while let Some((x, y)) = stack.pop() {
-            if !bounds.contains(x, y) || *self.skin.pixels.get_pixel(x, y) != target {
+            if !bounds.contains(x, y)
+                || !self.editable(x, y)
+                || *self.skin.pixels.get_pixel(x, y) != target
+            {
                 continue;
             }
             self.skin.pixels.put_pixel(x, y, color);
@@ -147,8 +227,77 @@ impl Editor {
                 (x, y.wrapping_sub(1)),
             ]);
         }
-        self.revision += 1;
-        self.push_undo(before);
+    }
+
+    /// Degradado lineal de `c0` (en `from`) a `c1` (en `to`). Cubre la selección si la hay;
+    /// si no, la cara donde empezó el arrastre.
+    pub fn gradient(&mut self, from: (u32, u32), to: (u32, u32), c0: Rgba<u8>, c1: Rgba<u8>) {
+        let area = match self.selection {
+            Some(r) => r,
+            None => match face_at(self.skin.model, from.0, from.1) {
+                Some((p, l, f)) => rect(p, l, f, self.skin.model),
+                None => return,
+            },
+        };
+        let (fx, fy) = (from.0 as f32, from.1 as f32);
+        let (dx, dy) = (to.0 as f32 - fx, to.1 as f32 - fy);
+        let len2 = (dx * dx + dy * dy).max(1.0);
+        self.step(|e| {
+            for (x, y) in area.pixels() {
+                let t = (((x as f32 - fx) * dx + (y as f32 - fy) * dy) / len2).clamp(0.0, 1.0);
+                let c = Rgba(std::array::from_fn(|i| {
+                    (c0[i] as f32 + (c1[i] as f32 - c0[i] as f32) * t).round() as u8
+                }));
+                e.put(x, y, c);
+            }
+        });
+    }
+
+    /// Copia los píxeles de la selección (para usarlos con el sello).
+    pub fn copy_selection(&self) -> Option<RgbaImage> {
+        let r = self.selection?;
+        Some(image::imageops::crop_imm(&self.skin.pixels, r.x, r.y, r.w, r.h).to_image())
+    }
+
+    /// Estampa `img` con la esquina superior izquierda en `at`. Lo transparente no tapa.
+    pub fn stamp(&mut self, at: (u32, u32), img: &RgbaImage) {
+        self.step(|e| {
+            for (sx, sy, px) in img.enumerate_pixels() {
+                let (x, y) = (at.0 + sx, at.1 + sy);
+                if px[3] > 0 && x < 64 && y < 64 {
+                    e.put(x, y, *px);
+                }
+            }
+        });
+    }
+
+    pub fn erase_selection(&mut self) {
+        if let Some(r) = self.selection {
+            self.step(|e| r.pixels().for_each(|(x, y)| e.put(x, y, ERASE)));
+        }
+    }
+
+    /// Pega las partes marcadas de `source`. Si el modelo es distinto se convierten los brazos.
+    /// Pega aunque la capa esté oculta: es una elección explícita.
+    pub fn paste_parts(&mut self, source: &Skin, mask: &PartMask) {
+        let model = self.skin.model;
+        let source = convert_model(source, model);
+        self.step(|e| {
+            for part in PARTS {
+                for layer in LAYERS {
+                    if !mask[part as usize][layer as usize] {
+                        continue;
+                    }
+                    for face in FACES {
+                        for (x, y) in rect(part, layer, face, model).pixels() {
+                            e.skin
+                                .pixels
+                                .put_pixel(x, y, *source.pixels.get_pixel(x, y));
+                        }
+                    }
+                }
+            }
+        });
     }
 
     pub fn pick(&self, x: u32, y: u32) -> Rgba<u8> {
@@ -293,5 +442,87 @@ mod tests {
             pts.windows(2)
                 .all(|w| w[0].0.abs_diff(w[1].0) <= 1 && w[0].1.abs_diff(w[1].1) <= 1)
         );
+    }
+
+    #[test]
+    fn mirror_paints_both_sides() {
+        let mut e = editor();
+        e.set_mirror(Mirror::All);
+        e.begin_stroke();
+        e.paint_line((8, 9), (8, 9), RED);
+        e.end_stroke();
+        assert_eq!(e.pick(15, 9), RED);
+        // Solo la parte elegida: pintar en la cabeza ya no se refleja.
+        e.set_mirror(Mirror::Part(Part::RightArm));
+        e.begin_stroke();
+        e.paint_line((9, 12), (9, 12), RED);
+        e.end_stroke();
+        assert_eq!(e.pick(14, 12), TRANSPARENT);
+        e.undo();
+        e.undo();
+        assert_eq!(e.skin(), &Skin::blank(Model::Steve));
+    }
+
+    #[test]
+    fn selection_limits_painting() {
+        let mut e = editor();
+        e.set_selection(Some(Rect {
+            x: 8,
+            y: 8,
+            w: 2,
+            h: 2,
+        }));
+        e.fill(8, 8, RED);
+        assert_eq!(e.pick(9, 9), RED);
+        assert_eq!(e.pick(10, 8), TRANSPARENT);
+        e.erase_selection();
+        assert_eq!(e.pick(8, 8), TRANSPARENT);
+        assert_eq!(e.undo.len(), 2);
+    }
+
+    #[test]
+    fn gradient_goes_from_one_color_to_other() {
+        let mut e = editor();
+        let blue = Rgba([0, 0, 255, 255]);
+        e.gradient((8, 8), (15, 8), RED, blue);
+        assert_eq!(e.pick(8, 12), RED);
+        assert_eq!(e.pick(15, 12), blue);
+        let mid = e.pick(11, 12);
+        assert!(mid[0] > 0 && mid[2] > 0);
+        assert_eq!(e.pick(7, 12), TRANSPARENT); // fuera de la cara
+        assert_eq!(e.undo.len(), 1);
+    }
+
+    #[test]
+    fn copy_and_stamp() {
+        let mut e = editor();
+        e.fill(9, 9, RED);
+        e.set_selection(Some(Rect {
+            x: 8,
+            y: 8,
+            w: 2,
+            h: 1,
+        }));
+        let img = e.copy_selection().unwrap();
+        e.set_selection(None);
+        e.stamp((40, 8), &img);
+        assert_eq!(
+            (e.pick(40, 8), e.pick(41, 8), e.pick(42, 8)),
+            (RED, RED, TRANSPARENT)
+        );
+    }
+
+    #[test]
+    fn paste_parts_only_marked() {
+        let mut src = editor();
+        src.fill(9, 9, RED); // cabeza
+        src.fill(21, 21, RED); // torso
+        let mut mask = [[false; 2]; 6];
+        mask[Part::Head as usize][Layer::Base as usize] = true;
+        let mut e = Editor::new(Skin::blank(Model::Alex), 100);
+        e.paste_parts(src.skin(), &mask);
+        assert_eq!(e.pick(9, 9), RED);
+        assert_eq!(e.pick(21, 21), TRANSPARENT);
+        assert_eq!(e.skin().model, Model::Alex);
     }
 }

@@ -1,16 +1,17 @@
 //! Ventana principal: menús, panel de herramientas, lienzo 2D y diálogos.
 
 use crate::core::{FACES, LAYERS, Layer, LoadError, Model, PARTS, Part, Skin, convert_model, rect};
-use crate::editor::{ERASE, Editor, Tool};
+use crate::editor::colors::{palette_from, parse_hex, to_hex};
+use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
 use crate::project::{self, Project, ProjectError};
 use crate::render3d::{Camera, PRESETS, Preset, Renderer3d, Scene, pick};
-use crate::settings::{self, Settings, Theme, View};
+use crate::settings::{self, ACTIONS, Action, NamedColor, Settings, Shortcut, Theme, View};
 use eframe::egui::{
-    self, Color32, ColorImage, Key, KeyboardShortcut, Modifiers, Pos2, Rect, Sense, Stroke,
-    StrokeKind, TextureHandle, TextureOptions, Vec2, color_picker, ecolor::Hsva,
+    self, Color32, ColorImage, Key, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle,
+    TextureOptions, Vec2, color_picker, ecolor::Hsva,
 };
-use image::Rgba;
+use image::{Rgba, RgbaImage};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy)]
@@ -25,6 +26,15 @@ enum Dialog {
     Convert(Skin),
     Export(usize),
     Error(String),
+    CopyParts(PartMask),
+    PasteParts(PartMask),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MirrorMode {
+    Off,
+    All,
+    Selected,
 }
 
 #[derive(Clone, Copy)]
@@ -56,6 +66,20 @@ pub struct App {
     uploaded_rev: Option<u64>,
     camera: Camera,
     selected: Option<Part>,
+    /// Color secundario, el final del degradado.
+    color2: Hsva,
+    hex: String,
+    mirror: MirrorMode,
+    /// Donde empezó el arrastre de la selección o del degradado.
+    drag_from: Option<(u32, u32)>,
+    /// Lo que estampa el sello; se conserva al abrir otro archivo.
+    stamp: Option<RgbaImage>,
+    /// Partes copiadas; se conservan al abrir otro archivo para pegarlas en él.
+    clip: Option<(Skin, PartMask)>,
+    /// Acción que espera una tecla en Ajustes → Atajos.
+    binding: Option<Action>,
+    bind_msg: String,
+    new_color_name: String,
 }
 
 impl App {
@@ -89,6 +113,15 @@ impl App {
             uploaded_rev: None,
             camera: Camera::default(),
             selected: None,
+            color2: Hsva::from_srgba_unmultiplied([255, 255, 255, 255]),
+            hex: String::new(),
+            mirror: MirrorMode::Off,
+            drag_from: None,
+            stamp: None,
+            clip: None,
+            binding: None,
+            bind_msg: String::new(),
+            new_color_name: String::new(),
         }
     }
 
@@ -232,19 +265,114 @@ impl App {
     // ---- Entrada global ----
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.painting || self.dialog.is_some() {
+        if self.painting
+            || self.dialog.is_some()
+            || self.binding.is_some()
+            || ctx.egui_wants_keyboard_input()
+        {
             return;
         }
-        let key = |m, k| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k)));
-        // Ctrl+Mayús+Z primero: Ctrl+Z también coincidiría con él.
-        if key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || key(Modifiers::COMMAND, Key::Y) {
-            self.editor.redo();
-        } else if key(Modifiers::COMMAND, Key::Z) {
-            self.editor.undo();
-        } else if key(Modifiers::COMMAND, Key::S) {
-            self.save(false);
-        } else if key(Modifiers::COMMAND, Key::O) {
-            self.request(ctx, After::Open);
+        let pressed = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } => Some(shortcut_of(*key, *modifiers)),
+                _ => None,
+            })
+        });
+        if let Some(action) = pressed.and_then(|sc| self.settings.action_for(&sc)) {
+            self.act(ctx, action);
+        }
+    }
+
+    fn act(&mut self, ctx: &egui::Context, action: Action) {
+        match action {
+            Action::New => self.request(ctx, After::New),
+            Action::Open => self.request(ctx, After::Open),
+            Action::Save => {
+                self.save(false);
+            }
+            Action::SaveAs => {
+                self.save(true);
+            }
+            Action::Export => self.request_export(),
+            Action::Undo => self.editor.undo(),
+            Action::Redo => self.editor.redo(),
+            Action::CopySelection => {
+                if let Some(img) = self.editor.copy_selection() {
+                    self.stamp = Some(img);
+                    self.tool = Tool::Stamp;
+                    self.status = self.i18n.tr("status-stamp-copied");
+                }
+            }
+            Action::EraseSelection => self.editor.erase_selection(),
+            Action::Deselect => self.editor.set_selection(None),
+            Action::CopyParts => {
+                let mask = match self.selected {
+                    Some(p) => {
+                        let mut m = [[false; 2]; 6];
+                        m[p as usize] = [true; 2];
+                        m
+                    }
+                    None => [[true; 2]; 6],
+                };
+                self.dialog = Some(Dialog::CopyParts(mask));
+            }
+            Action::PasteParts => {
+                if let Some((_, mask)) = &self.clip {
+                    self.dialog = Some(Dialog::PasteParts(*mask));
+                }
+            }
+            Action::Pencil => self.tool = Tool::Pencil,
+            Action::Eraser => self.tool = Tool::Eraser,
+            Action::Fill => self.tool = Tool::Fill,
+            Action::Picker => self.tool = Tool::Picker,
+            Action::Gradient => self.tool = Tool::Gradient,
+            Action::Stamp => self.tool = Tool::Stamp,
+            Action::Select => self.tool = Tool::Select,
+            Action::ToggleMirror => {
+                self.mirror = if self.mirror == MirrorMode::Off {
+                    MirrorMode::All
+                } else {
+                    MirrorMode::Off
+                }
+            }
+            Action::SwapColors => std::mem::swap(&mut self.color, &mut self.color2),
+            Action::ToggleView => {
+                self.settings.view = match self.settings.view {
+                    View::Flat => View::ThreeD,
+                    View::ThreeD => View::Flat,
+                };
+                self.settings_changed = true;
+            }
+        }
+    }
+
+    fn can(&self, action: Action) -> bool {
+        match action {
+            Action::Undo => self.editor.can_undo(),
+            Action::Redo => self.editor.can_redo(),
+            Action::CopySelection | Action::EraseSelection | Action::Deselect => {
+                self.editor.selection().is_some()
+            }
+            Action::PasteParts => self.clip.is_some(),
+            _ => true,
+        }
+    }
+
+    /// Entrada de menú con su atajo a la derecha.
+    fn menu_item(&mut self, ui: &mut egui::Ui, action: Action) {
+        let mut button = egui::Button::new(action_name(&self.i18n, action));
+        if let Some(sc) = self.settings.shortcut(action) {
+            button = button.shortcut_text(shortcut_label(&self.i18n, &sc));
+        }
+        if ui.add_enabled(self.can(action), button).clicked() {
+            let ctx = ui.ctx().clone();
+            self.act(&ctx, action);
         }
     }
 
@@ -259,45 +387,25 @@ impl App {
     // ---- Paneles ----
 
     fn menu(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button(self.i18n.tr("menu-file"), |ui| {
-                if ui.button(self.i18n.tr("file-new")).clicked() {
-                    self.request(&ctx, After::New);
-                }
-                if ui.button(self.i18n.tr("file-open")).clicked() {
-                    self.request(&ctx, After::Open);
-                }
+                self.menu_item(ui, Action::New);
+                self.menu_item(ui, Action::Open);
                 ui.separator();
-                if ui.button(self.i18n.tr("file-save")).clicked() {
-                    self.save(false);
-                }
-                if ui.button(self.i18n.tr("file-save-as")).clicked() {
-                    self.save(true);
-                }
-                if ui.button(self.i18n.tr("file-export")).clicked() {
-                    self.request_export();
-                }
+                self.menu_item(ui, Action::Save);
+                self.menu_item(ui, Action::SaveAs);
+                self.menu_item(ui, Action::Export);
             });
             ui.menu_button(self.i18n.tr("menu-edit"), |ui| {
-                if ui
-                    .add_enabled(
-                        self.editor.can_undo(),
-                        egui::Button::new(self.i18n.tr("edit-undo")),
-                    )
-                    .clicked()
-                {
-                    self.editor.undo();
-                }
-                if ui
-                    .add_enabled(
-                        self.editor.can_redo(),
-                        egui::Button::new(self.i18n.tr("edit-redo")),
-                    )
-                    .clicked()
-                {
-                    self.editor.redo();
-                }
+                self.menu_item(ui, Action::Undo);
+                self.menu_item(ui, Action::Redo);
+                ui.separator();
+                self.menu_item(ui, Action::CopySelection);
+                self.menu_item(ui, Action::EraseSelection);
+                self.menu_item(ui, Action::Deselect);
+                ui.separator();
+                self.menu_item(ui, Action::CopyParts);
+                self.menu_item(ui, Action::PasteParts);
             });
             if ui.button(self.i18n.tr("menu-settings")).clicked() {
                 self.show_settings = true;
@@ -320,27 +428,184 @@ impl App {
     }
 
     fn side(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            self.side_tools(ui);
+            ui.separator();
+            self.side_colors(ui);
+            ui.separator();
+            self.side_parts(ui);
+        });
+    }
+
+    fn side_tools(&mut self, ui: &mut egui::Ui) {
         let i = &self.i18n;
         ui.heading(i.tr("tools"));
-        for (tool, name) in [
-            (Tool::Pencil, i.tr("tool-pencil")),
-            (Tool::Eraser, i.tr("tool-eraser")),
-            (Tool::Fill, i.tr("tool-fill")),
-            (Tool::Picker, i.tr("tool-picker")),
-        ] {
-            ui.selectable_value(&mut self.tool, tool, name);
+        ui.horizontal_wrapped(|ui| {
+            for (tool, action) in [
+                (Tool::Pencil, Action::Pencil),
+                (Tool::Eraser, Action::Eraser),
+                (Tool::Fill, Action::Fill),
+                (Tool::Picker, Action::Picker),
+                (Tool::Gradient, Action::Gradient),
+                (Tool::Stamp, Action::Stamp),
+                (Tool::Select, Action::Select),
+            ] {
+                let mut resp = ui.selectable_value(&mut self.tool, tool, action_name(i, action));
+                if let Some(sc) = self.settings.shortcut(action) {
+                    resp = resp.on_hover_text(shortcut_label(i, &sc));
+                }
+                if tool == Tool::Stamp && self.stamp.is_none() {
+                    resp.on_hover_text(i.tr("stamp-empty"));
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(i.tr("mirror"));
+            ui.selectable_value(&mut self.mirror, MirrorMode::Off, i.tr("mirror-off"));
+            ui.selectable_value(&mut self.mirror, MirrorMode::All, i.tr("mirror-all"));
+            ui.selectable_value(&mut self.mirror, MirrorMode::Selected, i.tr("mirror-part"));
+        });
+        if self.mirror == MirrorMode::Selected && self.selected.is_none() {
+            ui.weak(i.tr("mirror-pick-part"));
         }
-        ui.separator();
+    }
+
+    fn side_colors(&mut self, ui: &mut egui::Ui) {
+        let i = &self.i18n;
+        ui.heading(i.tr("color"));
         ui.horizontal(|ui| {
-            ui.label(i.tr("color"));
             color_picker::color_edit_button_hsva(
                 ui,
                 &mut self.color,
                 color_picker::Alpha::OnlyBlend,
+            )
+            .on_hover_text(i.tr("color-primary"));
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.hex)
+                    .desired_width(80.0)
+                    .font(egui::TextStyle::Monospace),
             );
+            if resp.changed()
+                && let Some(c) = parse_hex(&self.hex)
+            {
+                self.color = Hsva::from_srgba_unmultiplied(c);
+            }
+            if !resp.has_focus() {
+                self.hex = to_hex(self.color.to_srgba_unmultiplied());
+            }
+            resp.on_hover_text(i.tr("color-hex"));
         });
-        ui.separator();
+        ui.horizontal(|ui| {
+            color_picker::color_edit_button_hsva(
+                ui,
+                &mut self.color2,
+                color_picker::Alpha::OnlyBlend,
+            )
+            .on_hover_text(i.tr("color-secondary"));
+            if ui.button(action_name(i, Action::SwapColors)).clicked() {
+                std::mem::swap(&mut self.color, &mut self.color2);
+            }
+        });
 
+        if !self.settings.recent_colors.is_empty() {
+            ui.label(i.tr("color-recent"));
+            ui.horizontal_wrapped(|ui| {
+                for c in self.settings.recent_colors.clone() {
+                    if swatch(ui, c).on_hover_text(to_hex(c)).clicked() {
+                        self.color = Hsva::from_srgba_unmultiplied(c);
+                    }
+                }
+            });
+        }
+
+        let mut import = false;
+        egui::CollapsingHeader::new(i.tr("palette"))
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut remove = None;
+                ui.horizontal_wrapped(|ui| {
+                    for (k, entry) in self.settings.palette.iter_mut().enumerate() {
+                        let resp = swatch(ui, entry.rgba).on_hover_text(format!(
+                            "{}  {}",
+                            entry.name,
+                            to_hex(entry.rgba)
+                        ));
+                        if resp.clicked() {
+                            self.color = Hsva::from_srgba_unmultiplied(entry.rgba);
+                        }
+                        resp.context_menu(|ui| {
+                            ui.label(i.tr("palette-name"));
+                            if ui.text_edit_singleline(&mut entry.name).changed() {
+                                self.settings_changed = true;
+                            }
+                            if ui.button(i.tr("palette-remove")).clicked() {
+                                remove = Some(k);
+                                ui.close();
+                            }
+                        });
+                    }
+                });
+                if let Some(k) = remove {
+                    self.settings.palette.remove(k);
+                    self.settings_changed = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_color_name)
+                            .desired_width(110.0)
+                            .hint_text(i.tr("palette-name")),
+                    );
+                    if ui.button(i.tr("palette-add")).clicked() {
+                        let rgba = self.color.to_srgba_unmultiplied();
+                        let name = match self.new_color_name.trim() {
+                            "" => to_hex(rgba),
+                            n => n.to_string(),
+                        };
+                        self.settings.palette.push(NamedColor { name, rgba });
+                        self.new_color_name.clear();
+                        self.settings_changed = true;
+                    }
+                });
+                import = ui.button(i.tr("palette-import")).clicked();
+                if !self.settings.palette.is_empty() {
+                    ui.weak(i.tr("palette-hint"));
+                }
+            });
+        if import {
+            self.import_palette();
+        }
+    }
+
+    /// Agrega a la paleta los colores más usados de un PNG (una skin u otra imagen).
+    fn import_palette(&mut self) {
+        let Some(path) = png_dialog().pick_file() else {
+            return;
+        };
+        let img = match std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| image::load_from_memory(&b).map_err(|e| e.to_string()))
+        {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => return self.error(self.i18n.tr_args("error-io", &[("detail", e.into())])),
+        };
+        let mut added = 0;
+        for rgba in palette_from(&img, PALETTE_IMPORT_MAX) {
+            if !self.settings.palette.iter().any(|c| c.rgba == rgba) {
+                self.settings.palette.push(NamedColor {
+                    name: to_hex(rgba),
+                    rgba,
+                });
+                added += 1;
+            }
+        }
+        self.settings_changed = true;
+        self.status = self
+            .i18n
+            .tr_args("status-palette-imported", &[("count", added.into())]);
+    }
+
+    fn side_parts(&mut self, ui: &mut egui::Ui) {
+        let i = &self.i18n;
         let model = self.editor.skin().model;
         let other = if model == Model::Steve {
             Model::Alex
@@ -358,14 +623,6 @@ impl App {
         ui.separator();
 
         ui.heading(i.tr("layers"));
-        let names = [
-            (Part::Head, i.tr("part-head")),
-            (Part::Body, i.tr("part-body")),
-            (Part::RightArm, i.tr("part-right-arm")),
-            (Part::LeftArm, i.tr("part-left-arm")),
-            (Part::RightLeg, i.tr("part-right-leg")),
-            (Part::LeftLeg, i.tr("part-left-leg")),
-        ];
         let layer_names = [i.tr("layer-base"), i.tr("layer-overlay")];
         egui::Grid::new("visibility").show(ui, |ui| {
             ui.label("");
@@ -373,11 +630,20 @@ impl App {
                 ui.label(n);
             }
             ui.end_row();
-            for (part, name) in names {
-                if self.selected == Some(part) {
-                    ui.label(egui::RichText::new(&name).strong().color(ACCENT));
+            for part in PARTS {
+                let name = part_name(i, part);
+                let is_sel = self.selected == Some(part);
+                let text = if is_sel {
+                    egui::RichText::new(&name).strong().color(ACCENT)
                 } else {
-                    ui.label(&name);
+                    egui::RichText::new(&name)
+                };
+                if ui
+                    .selectable_label(is_sel, text)
+                    .on_hover_text(i.tr("part-select-hint"))
+                    .clicked()
+                {
+                    self.selected = (!is_sel).then_some(part);
                 }
                 for (layer, layer_name) in LAYERS.into_iter().zip(&layer_names) {
                     let mut on = self.editor.is_visible(part, layer);
@@ -604,19 +870,68 @@ impl App {
                 }
             }
 
-            let hover = resp
-                .interact_pointer_pos()
-                .or(resp.hover_pos())
-                .and_then(|p| {
-                    let t = (p - area.min) / px;
-                    (t.x >= 0.0 && t.y >= 0.0 && t.x < 64.0 && t.y < 64.0)
-                        .then_some((t.x as u32, t.y as u32))
-                });
-            self.handle_canvas_input(&resp, hover);
+            let pointer = resp.interact_pointer_pos().or(resp.hover_pos());
+            let hover = pointer.and_then(|p| {
+                let t = (p - area.min) / px;
+                (t.x >= 0.0 && t.y >= 0.0 && t.x < 64.0 && t.y < 64.0)
+                    .then_some((t.x as u32, t.y as u32))
+            });
+            // Para arrastres que salen del lienzo: el píxel más cercano dentro.
+            let clamped = pointer.map(|p| {
+                let t = (p - area.min) / px;
+                (t.x.clamp(0.0, 63.0) as u32, t.y.clamp(0.0, 63.0) as u32)
+            });
+
+            let marquee = |r: crate::core::Rect| {
+                let r = to_screen(r);
+                painter.rect_stroke(r, 0.0, Stroke::new(3.0, Color32::BLACK), StrokeKind::Inside);
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::WHITE), StrokeKind::Inside);
+            };
+            if let Some(sel) = self.editor.selection() {
+                marquee(sel);
+            }
+            let center =
+                |(x, y): (u32, u32)| area.min + Vec2::new(x as f32 + 0.5, y as f32 + 0.5) * px;
+            match (self.tool, self.drag_from, clamped) {
+                (Tool::Gradient, Some(a), Some(b)) => {
+                    painter.line_segment([center(a), center(b)], Stroke::new(2.0, ACCENT));
+                }
+                (Tool::Stamp, _, _) => {
+                    if let (Some(img), Some((x, y))) = (&self.stamp, hover) {
+                        marquee(crate::core::Rect {
+                            x,
+                            y,
+                            w: img.width().min(64 - x),
+                            h: img.height().min(64 - y),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            self.handle_canvas_input(&resp, hover, clamped);
         });
     }
 
-    fn handle_canvas_input(&mut self, resp: &egui::Response, at: Option<(u32, u32)>) {
+    fn primary(&self) -> Rgba<u8> {
+        Rgba(self.color.to_srgba_unmultiplied())
+    }
+
+    fn remember(&mut self, c: Rgba<u8>) {
+        self.settings.remember_color(c.0);
+        self.settings_changed = true;
+    }
+
+    fn handle_canvas_input(
+        &mut self,
+        resp: &egui::Response,
+        at: Option<(u32, u32)>,
+        clamped: Option<(u32, u32)>,
+    ) {
+        self.editor.set_mirror(match self.mirror {
+            MirrorMode::Off => Mirror::Off,
+            MirrorMode::All => Mirror::All,
+            MirrorMode::Selected => self.selected.map_or(Mirror::Off, Mirror::Part),
+        });
         match self.tool {
             Tool::Pencil | Tool::Eraser => {
                 let down = resp.is_pointer_button_down_on()
@@ -625,6 +940,9 @@ impl App {
                     self.editor.begin_stroke();
                     self.painting = true;
                     self.last_px = None;
+                    if self.tool == Tool::Pencil {
+                        self.remember(self.primary());
+                    }
                 }
                 if !self.painting {
                     return;
@@ -637,7 +955,7 @@ impl App {
                 let color = if self.tool == Tool::Eraser {
                     ERASE
                 } else {
-                    Rgba(self.color.to_srgba_unmultiplied())
+                    self.primary()
                 };
                 if let Some(p) = at {
                     self.editor.paint_line(self.last_px.unwrap_or(p), p, color);
@@ -646,13 +964,53 @@ impl App {
             }
             Tool::Fill => {
                 if let (true, Some((x, y))) = (resp.clicked(), at) {
-                    self.editor
-                        .fill(x, y, Rgba(self.color.to_srgba_unmultiplied()));
+                    let c = self.primary();
+                    self.editor.fill(x, y, c);
+                    self.remember(c);
                 }
             }
             Tool::Picker => {
                 if let (true, Some((x, y))) = (resp.clicked(), at) {
                     self.color = Hsva::from_srgba_unmultiplied(self.editor.pick(x, y).0);
+                }
+            }
+            Tool::Select => {
+                if resp.drag_started() {
+                    self.drag_from = at;
+                }
+                if let (Some(a), Some(b)) = (self.drag_from, clamped)
+                    && resp.dragged()
+                {
+                    self.editor.set_selection(Some(crate::core::Rect {
+                        x: a.0.min(b.0),
+                        y: a.1.min(b.1),
+                        w: a.0.abs_diff(b.0) + 1,
+                        h: a.1.abs_diff(b.1) + 1,
+                    }));
+                }
+                if resp.drag_stopped() {
+                    self.drag_from = None;
+                }
+                if resp.clicked() {
+                    self.editor.set_selection(None);
+                }
+            }
+            Tool::Gradient => {
+                if resp.drag_started() {
+                    self.drag_from = at;
+                }
+                if resp.drag_stopped()
+                    && let (Some(a), Some(b)) = (self.drag_from.take(), clamped)
+                {
+                    let c0 = self.primary();
+                    self.editor
+                        .gradient(a, b, c0, Rgba(self.color2.to_srgba_unmultiplied()));
+                    self.remember(c0);
+                }
+            }
+            Tool::Stamp => {
+                if let (true, Some(at), Some(img)) = (resp.clicked(), at, &self.stamp) {
+                    self.editor.stamp(at, img);
                 }
             }
         }
@@ -699,7 +1057,19 @@ impl App {
                     ui.add(egui::DragValue::new(&mut s.undo_levels).range(settings::UNDO_LEVELS));
                     ui.end_row();
                 });
+                egui::CollapsingHeader::new(i.tr("settings-shortcuts")).show(ui, |ui| {
+                    shortcuts_editor(
+                        ui,
+                        i,
+                        &mut self.settings,
+                        &mut self.binding,
+                        &mut self.bind_msg,
+                    );
+                });
             });
+        if !open {
+            self.binding = None;
+        }
         self.show_settings = open;
 
         if self.settings != before {
@@ -737,7 +1107,8 @@ impl App {
             picked
         };
         let id = egui::Id::unique("dialog");
-        let resp = egui::Modal::new(id).show(ctx, |ui| match &dialog {
+        let mut dialog = dialog;
+        let resp = egui::Modal::new(id).show(ctx, |ui| match &mut dialog {
             Dialog::Discard(_) => {
                 ui.label(i.tr("discard-question"));
                 buttons(
@@ -795,8 +1166,33 @@ impl App {
                 )
             }
             Dialog::Error(msg) => {
-                ui.label(msg);
+                ui.label(msg.as_str());
                 buttons(ui, &[(Choice::Cancel, i.tr("ok"))])
+            }
+            Dialog::CopyParts(mask) => {
+                ui.heading(i.tr("parts-copy-title"));
+                ui.label(i.tr("parts-copy-note"));
+                mask_grid(ui, i, mask, &[[true; 2]; 6]);
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("parts-copy")),
+                        (Choice::Cancel, i.tr("cancel")),
+                    ],
+                )
+            }
+            Dialog::PasteParts(mask) => {
+                ui.heading(i.tr("parts-paste-title"));
+                ui.label(i.tr("parts-paste-note"));
+                let copied = self.clip.as_ref().map_or([[false; 2]; 6], |c| c.1);
+                mask_grid(ui, i, mask, &copied);
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("parts-paste")),
+                        (Choice::Cancel, i.tr("cancel")),
+                    ],
+                )
             }
         });
         let choice = match resp.inner {
@@ -816,6 +1212,15 @@ impl App {
             (Dialog::Discard(after), Choice::Alternate) => self.run(ctx, after),
             (Dialog::Convert(skin), Choice::Accept) => self.editor.replace(skin),
             (Dialog::Export(_), Choice::Accept) => self.export(),
+            (Dialog::CopyParts(mask), Choice::Accept) => {
+                self.clip = Some((self.editor.skin().clone(), mask));
+                self.status = self.i18n.tr("status-parts-copied");
+            }
+            (Dialog::PasteParts(mask), Choice::Accept) => {
+                if let Some((skin, _)) = &self.clip {
+                    self.editor.paste_parts(skin, &mask);
+                }
+            }
             _ => {}
         }
     }
@@ -834,6 +1239,176 @@ impl eframe::App for App {
         egui::CentralPanel::default_margins().show(ui, |ui| self.central(ui));
         self.settings_window(&ctx);
         self.dialogs(&ctx);
+    }
+}
+
+/// Lista de atajos: clic en uno y pulsar la combinación nueva. Esc cancela.
+fn shortcuts_editor(
+    ui: &mut egui::Ui,
+    i: &I18n,
+    s: &mut Settings,
+    binding: &mut Option<Action>,
+    msg: &mut String,
+) {
+    if let Some(action) = *binding {
+        let pressed = ui.input(|inp| {
+            inp.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some((*key, *modifiers)),
+                _ => None,
+            })
+        });
+        match pressed {
+            Some((Key::Escape, _)) => *binding = None,
+            Some((key, m)) => {
+                *binding = None;
+                match s.bind(action, Some(shortcut_of(key, m))) {
+                    Ok(()) => msg.clear(),
+                    Err(other) => {
+                        *msg = i.tr_args(
+                            "shortcut-clash",
+                            &[("action", action_name(i, other).into())],
+                        )
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    if !msg.is_empty() {
+        ui.colored_label(ui.visuals().warn_fg_color, msg.as_str());
+    }
+    egui::ScrollArea::vertical()
+        .max_height(300.0)
+        .show(ui, |ui| {
+            egui::Grid::new("shortcuts").num_columns(3).show(ui, |ui| {
+                for action in ACTIONS {
+                    ui.label(action_name(i, action));
+                    let text = if *binding == Some(action) {
+                        i.tr("shortcut-press")
+                    } else {
+                        s.shortcut(action)
+                            .map_or_else(|| i.tr("shortcut-none"), |sc| shortcut_label(i, &sc))
+                    };
+                    if ui.button(text).clicked() {
+                        *binding = Some(action);
+                        msg.clear();
+                    }
+                    if ui.small_button(i.tr("shortcut-clear")).clicked() {
+                        let _ = s.bind(action, None);
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+    if ui.button(i.tr("shortcut-reset")).clicked() {
+        s.shortcuts.clear();
+        msg.clear();
+    }
+}
+
+/// Casillas parte × capa. Las que no están en `allowed` quedan desactivadas.
+fn mask_grid(ui: &mut egui::Ui, i: &I18n, mask: &mut PartMask, allowed: &PartMask) {
+    egui::Grid::new("mask").show(ui, |ui| {
+        ui.label("");
+        ui.label(i.tr("layer-base"));
+        ui.label(i.tr("layer-overlay"));
+        ui.end_row();
+        for part in PARTS {
+            ui.label(part_name(i, part));
+            for layer in LAYERS {
+                let ok = allowed[part as usize][layer as usize];
+                let cell = &mut mask[part as usize][layer as usize];
+                *cell &= ok;
+                ui.add_enabled(ok, egui::Checkbox::without_text(cell));
+            }
+            ui.end_row();
+        }
+    });
+}
+
+fn swatch(ui: &mut egui::Ui, c: [u8; 4]) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+    let p = ui.painter();
+    p.rect_filled(
+        r,
+        2.0,
+        Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]),
+    );
+    let stroke = if resp.hovered() {
+        Stroke::new(2.0, ACCENT)
+    } else {
+        ui.visuals().widgets.noninteractive.bg_stroke
+    };
+    p.rect_stroke(r, 2.0, stroke, StrokeKind::Inside);
+    resp
+}
+
+const PALETTE_IMPORT_MAX: usize = 32;
+
+fn shortcut_of(key: Key, m: egui::Modifiers) -> Shortcut {
+    Shortcut {
+        ctrl: m.command,
+        shift: m.shift,
+        alt: m.alt,
+        key: key.name().into(),
+    }
+}
+
+fn shortcut_label(i: &I18n, sc: &Shortcut) -> String {
+    let mut parts = Vec::new();
+    for (on, k) in [
+        (sc.ctrl, i.tr("key-ctrl")),
+        (sc.shift, i.tr("key-shift")),
+        (sc.alt, i.tr("key-alt")),
+    ] {
+        if on {
+            parts.push(k);
+        }
+    }
+    parts.push(Key::from_name(&sc.key).map_or(sc.key.clone(), |k| k.symbol_or_name().into()));
+    parts.join("+")
+}
+
+fn action_name(i: &I18n, a: Action) -> String {
+    match a {
+        Action::New => i.tr("file-new"),
+        Action::Open => i.tr("file-open"),
+        Action::Save => i.tr("file-save"),
+        Action::SaveAs => i.tr("file-save-as"),
+        Action::Export => i.tr("file-export"),
+        Action::Undo => i.tr("edit-undo"),
+        Action::Redo => i.tr("edit-redo"),
+        Action::CopySelection => i.tr("edit-copy-selection"),
+        Action::EraseSelection => i.tr("edit-erase-selection"),
+        Action::Deselect => i.tr("edit-deselect"),
+        Action::CopyParts => i.tr("edit-copy-parts"),
+        Action::PasteParts => i.tr("edit-paste-parts"),
+        Action::Pencil => i.tr("tool-pencil"),
+        Action::Eraser => i.tr("tool-eraser"),
+        Action::Fill => i.tr("tool-fill"),
+        Action::Picker => i.tr("tool-picker"),
+        Action::Gradient => i.tr("tool-gradient"),
+        Action::Stamp => i.tr("tool-stamp"),
+        Action::Select => i.tr("tool-select"),
+        Action::ToggleMirror => i.tr("action-toggle-mirror"),
+        Action::SwapColors => i.tr("action-swap-colors"),
+        Action::ToggleView => i.tr("action-toggle-view"),
+    }
+}
+
+fn part_name(i: &I18n, p: Part) -> String {
+    match p {
+        Part::Head => i.tr("part-head"),
+        Part::Body => i.tr("part-body"),
+        Part::RightArm => i.tr("part-right-arm"),
+        Part::LeftArm => i.tr("part-left-arm"),
+        Part::RightLeg => i.tr("part-right-leg"),
+        Part::LeftLeg => i.tr("part-left-leg"),
     }
 }
 

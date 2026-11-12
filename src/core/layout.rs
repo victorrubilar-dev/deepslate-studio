@@ -113,6 +113,33 @@ pub fn face_at(model: Model, x: u32, y: u32) -> Option<(Part, Layer, Face)> {
     None
 }
 
+impl Part {
+    /// La parte del otro lado del cuerpo (la cabeza y el torso son su propio reflejo).
+    pub fn mirrored(self) -> Part {
+        match self {
+            Part::RightArm => Part::LeftArm,
+            Part::LeftArm => Part::RightArm,
+            Part::RightLeg => Part::LeftLeg,
+            Part::LeftLeg => Part::RightLeg,
+            p => p,
+        }
+    }
+}
+
+/// Píxel simétrico de (x, y) respecto al plano medio del personaje: misma capa, la parte
+/// y la cara del otro lado, y la columna volteada. Es su propia inversa.
+pub fn mirror_pixel(model: Model, x: u32, y: u32) -> Option<(u32, u32)> {
+    let (part, layer, face) = face_at(model, x, y)?;
+    let src = rect(part, layer, face, model);
+    let other_face = match face {
+        Face::Right => Face::Left,
+        Face::Left => Face::Right,
+        f => f,
+    };
+    let dst = rect(part.mirrored(), layer, other_face, model);
+    Some((dst.x + src.w - 1 - (x - src.x), dst.y + (y - src.y)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +263,34 @@ mod tests {
             face_at(Model::Steve, 55, 20),
             Some((Part::RightArm, Layer::Base, Face::Back))
         );
+    }
+
+    #[test]
+    fn mirror_is_an_involution() {
+        for model in [Model::Steve, Model::Alex] {
+            for r in all(model) {
+                for (x, y) in r.pixels() {
+                    let m = mirror_pixel(model, x, y).unwrap();
+                    assert_eq!(mirror_pixel(model, m.0, m.1), Some((x, y)));
+                }
+            }
+        }
+        assert_eq!(mirror_pixel(Model::Steve, 0, 0), None);
+    }
+
+    #[test]
+    fn mirror_known_pixels() {
+        let s = Model::Steve;
+        // Frente de la cabeza: columna 8 ↔ 15.
+        assert_eq!(mirror_pixel(s, 8, 9), Some((15, 9)));
+        // Cara exterior del brazo derecho (x 40..44) ↔ exterior del izquierdo (x 40..44, y 52..64).
+        let outer_r = rect(Part::RightArm, Layer::Base, Face::Right, s);
+        let outer_l = rect(Part::LeftArm, Layer::Base, Face::Left, s);
+        assert_eq!(
+            mirror_pixel(s, outer_r.x, outer_r.y),
+            Some((outer_l.x + outer_l.w - 1, outer_l.y))
+        );
+        // Lado derecho de la cabeza ↔ lado izquierdo.
+        assert_eq!(mirror_pixel(s, 0, 8), Some((23, 8)));
     }
 }

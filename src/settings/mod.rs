@@ -1,6 +1,7 @@
 //! Ajustes básicos guardados en RON, en la carpeta de configuración estándar del sistema.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +17,119 @@ pub enum Theme {
     Light,
 }
 
+/// Acciones que se pueden lanzar con un atajo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Action {
+    New,
+    Open,
+    Save,
+    SaveAs,
+    Export,
+    Undo,
+    Redo,
+    CopySelection,
+    EraseSelection,
+    Deselect,
+    CopyParts,
+    PasteParts,
+    Pencil,
+    Eraser,
+    Fill,
+    Picker,
+    Gradient,
+    Stamp,
+    Select,
+    ToggleMirror,
+    SwapColors,
+    ToggleView,
+}
+
+pub const ACTIONS: [Action; 22] = [
+    Action::New,
+    Action::Open,
+    Action::Save,
+    Action::SaveAs,
+    Action::Export,
+    Action::Undo,
+    Action::Redo,
+    Action::CopySelection,
+    Action::EraseSelection,
+    Action::Deselect,
+    Action::CopyParts,
+    Action::PasteParts,
+    Action::Pencil,
+    Action::Eraser,
+    Action::Fill,
+    Action::Picker,
+    Action::Gradient,
+    Action::Stamp,
+    Action::Select,
+    Action::ToggleMirror,
+    Action::SwapColors,
+    Action::ToggleView,
+];
+
+/// Combinación de teclas. `ctrl` es Cmd en macOS. `key` es el nombre de la tecla en egui.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shortcut {
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub alt: bool,
+    pub key: String,
+}
+
+impl Shortcut {
+    fn new(ctrl: bool, shift: bool, key: &str) -> Self {
+        Self {
+            ctrl,
+            shift,
+            alt: false,
+            key: key.into(),
+        }
+    }
+}
+
+impl Action {
+    pub fn default_shortcut(self) -> Option<Shortcut> {
+        let (ctrl, shift, key) = match self {
+            Action::New => (true, false, "N"),
+            Action::Open => (true, false, "O"),
+            Action::Save => (true, false, "S"),
+            Action::SaveAs => (true, true, "S"),
+            Action::Export => (true, false, "E"),
+            Action::Undo => (true, false, "Z"),
+            Action::Redo => (true, true, "Z"),
+            Action::CopySelection => (true, false, "C"),
+            Action::EraseSelection => (false, false, "Delete"),
+            Action::Deselect => (true, false, "D"),
+            Action::CopyParts => (true, true, "C"),
+            Action::PasteParts => (true, true, "V"),
+            Action::Pencil => (false, false, "B"),
+            Action::Eraser => (false, false, "E"),
+            Action::Fill => (false, false, "F"),
+            Action::Picker => (false, false, "I"),
+            Action::Gradient => (false, false, "G"),
+            Action::Stamp => (false, false, "K"),
+            Action::Select => (false, false, "M"),
+            Action::ToggleMirror => (false, false, "X"),
+            Action::SwapColors => (false, false, "W"),
+            Action::ToggleView => (false, false, "V"),
+        };
+        Some(Shortcut::new(ctrl, shift, key))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NamedColor {
+    pub name: String,
+    pub rgba: [u8; 4],
+}
+
+pub const RECENT_COLORS: usize = 16;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -25,6 +139,11 @@ pub struct Settings {
     pub undo_levels: usize,
     /// Última vista usada (2D o 3D).
     pub view: View,
+    /// Solo los atajos cambiados; `None` es «sin atajo». Lo que falta usa el valor por defecto.
+    pub shortcuts: BTreeMap<Action, Option<Shortcut>>,
+    /// Colores usados, el más reciente primero.
+    pub recent_colors: Vec<[u8; 4]>,
+    pub palette: Vec<NamedColor>,
 }
 
 impl Default for Settings {
@@ -35,6 +154,9 @@ impl Default for Settings {
             show_grid: true,
             undo_levels: 100,
             view: View::Flat,
+            shortcuts: BTreeMap::new(),
+            recent_colors: Vec::new(),
+            palette: Vec::new(),
         }
     }
 }
@@ -72,6 +194,40 @@ impl Settings {
         std::fs::write(path, text)
     }
 
+    pub fn shortcut(&self, action: Action) -> Option<Shortcut> {
+        match self.shortcuts.get(&action) {
+            Some(s) => s.clone(),
+            None => action.default_shortcut(),
+        }
+    }
+
+    pub fn action_for(&self, sc: &Shortcut) -> Option<Action> {
+        ACTIONS
+            .into_iter()
+            .find(|&a| self.shortcut(a).as_ref() == Some(sc))
+    }
+
+    /// Asigna el atajo. Si otra acción ya lo usa, no cambia nada y devuelve esa acción.
+    pub fn bind(&mut self, action: Action, sc: Option<Shortcut>) -> Result<(), Action> {
+        if let Some(sc) = &sc
+            && let Some(other) = self.action_for(sc).filter(|&o| o != action)
+        {
+            return Err(other);
+        }
+        if sc == action.default_shortcut() {
+            self.shortcuts.remove(&action);
+        } else {
+            self.shortcuts.insert(action, sc);
+        }
+        Ok(())
+    }
+
+    pub fn remember_color(&mut self, c: [u8; 4]) {
+        self.recent_colors.retain(|&x| x != c);
+        self.recent_colors.insert(0, c);
+        self.recent_colors.truncate(RECENT_COLORS);
+    }
+
     fn clamped(mut self) -> Self {
         self.pixel_size = self
             .pixel_size
@@ -79,6 +235,7 @@ impl Settings {
         self.undo_levels = self
             .undo_levels
             .clamp(*UNDO_LEVELS.start(), *UNDO_LEVELS.end());
+        self.recent_colors.truncate(RECENT_COLORS);
         self
     }
 }
@@ -123,5 +280,54 @@ mod tests {
         std::fs::write(&path, "(pixel_size: 999.0, undo_levels: 0)").unwrap();
         let s = Settings::load_from(&path);
         assert_eq!((s.pixel_size, s.undo_levels, s.show_grid), (40.0, 1, true));
+    }
+
+    #[test]
+    fn defaults_have_no_clashes() {
+        let s = Settings::default();
+        for a in ACTIONS {
+            let sc = s.shortcut(a).unwrap();
+            assert_eq!(s.action_for(&sc), Some(a), "{sc:?}");
+        }
+    }
+
+    #[test]
+    fn bind_rejects_clash_and_persists() {
+        let mut s = Settings::default();
+        let ctrl_z = Action::Undo.default_shortcut();
+        assert_eq!(s.bind(Action::Pencil, ctrl_z.clone()), Err(Action::Undo));
+        assert_eq!(
+            s.shortcut(Action::Pencil),
+            Action::Pencil.default_shortcut()
+        );
+        // Liberar Ctrl+Z y dárselo al lápiz.
+        s.bind(Action::Undo, None).unwrap();
+        s.bind(Action::Pencil, ctrl_z.clone()).unwrap();
+        assert_eq!(s.action_for(ctrl_z.as_ref().unwrap()), Some(Action::Pencil));
+        let path = tmp("shortcuts");
+        s.save_to(&path).unwrap();
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.shortcut(Action::Undo), None);
+        assert_eq!(loaded.shortcut(Action::Pencil), ctrl_z);
+        // Volver al valor por defecto no deja entrada guardada.
+        s.bind(Action::Undo, Action::Undo.default_shortcut())
+            .unwrap_err();
+        s.bind(Action::Pencil, Action::Pencil.default_shortcut())
+            .unwrap();
+        s.bind(Action::Undo, Action::Undo.default_shortcut())
+            .unwrap();
+        assert!(s.shortcuts.is_empty());
+    }
+
+    #[test]
+    fn recent_colors_dedupe_and_cap() {
+        let mut s = Settings::default();
+        for i in 0..20u8 {
+            s.remember_color([i, 0, 0, 255]);
+        }
+        s.remember_color([5, 0, 0, 255]);
+        assert_eq!(s.recent_colors.len(), RECENT_COLORS);
+        assert_eq!(s.recent_colors[0], [5, 0, 0, 255]);
+        assert_eq!(s.recent_colors.iter().filter(|c| c[0] == 5).count(), 1);
     }
 }
