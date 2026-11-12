@@ -5,5 +5,5 @@ mod mesh;
 mod pose;
 
 pub use gpu::{Renderer3d, Scene};
-pub use mesh::{Camera, Hit, pick, project};
+pub use mesh::{Camera, FOV_DEG, Hit, part_center, pick, project};
 pub use pose::{ANGLE_LIMIT, PRESETS, Pose, Preset};

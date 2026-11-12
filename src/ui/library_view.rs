@@ -1,5 +1,6 @@
 //! Pantalla de biblioteca: tarjetas con fondo, personaje en su pose y datos.
 
+use super::icons::{self, Icon};
 use super::{App, Dialog, blank_project, file_name, png_dialog, style};
 use crate::core::Model;
 use crate::editor::templates::{self, Template};
@@ -33,6 +34,13 @@ pub(super) struct LibraryState {
     custom: HashMap<String, Option<TextureHandle>>,
     /// Vista del editor a la que se vuelve al abrir una skin.
     pub return_view: View,
+    /// Cuándo se entró a la biblioteca (segundos de egui): las tarjetas aparecen desde ahí.
+    pub shown_at: f64,
+    /// Colección que se muestra; `None` muestra todas.
+    collection: Option<String>,
+    collections: Vec<String>,
+    sort: library::Sort,
+    new_collection: String,
 }
 
 impl Default for LibraryState {
@@ -45,7 +53,12 @@ impl Default for LibraryState {
             thumbs: HashMap::new(),
             presets: Vec::new(),
             custom: HashMap::new(),
-            return_view: View::Flat,
+            return_view: View::ThreeD,
+            shown_at: 0.0,
+            collection: None,
+            collections: Vec::new(),
+            sort: library::Sort::Favorites,
+            new_collection: String::new(),
         }
     }
 }
@@ -115,26 +128,32 @@ fn start_options(i: &I18n) -> [(Start, String, String); 5] {
 }
 
 /// Botón grande de la bienvenida, con el mismo aspecto de bloque que las tarjetas.
-fn tile(ui: &mut egui::Ui, title: &str, desc: &str) -> egui::Response {
+fn tile(ui: &mut egui::Ui, title: &str, desc: &str, appear: f32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(250.0, 76.0), Sense::click());
-    let p = ui.painter();
+    let hover = ui.ctx().animate_bool_with_time(
+        resp.id,
+        resp.hovered() || resp.has_focus(),
+        ui.style().animation_time,
+    );
+    let mut p = ui.painter().clone();
+    p.multiply_opacity(appear);
     let v = ui.visuals();
     p.rect_filled(
         rect.translate(Vec2::splat(5.0)),
         0.0,
         Color32::from_black_alpha(120),
     );
-    let fill = if resp.hovered() {
-        v.widgets.hovered.bg_fill
-    } else {
-        v.widgets.inactive.bg_fill
-    };
-    p.rect_filled(rect, 0.0, fill);
-    let edge = if resp.hovered() {
-        style::ACCENT
-    } else {
-        Color32::from_black_alpha(200)
-    };
+    // Se levanta sobre su sombra al pasar el cursor y entra desde abajo al aparecer.
+    let rect = rect.translate(Vec2::new(-2.0 * hover, 10.0 * (1.0 - appear) - 2.0 * hover));
+    p.rect_filled(
+        rect,
+        0.0,
+        v.widgets
+            .inactive
+            .bg_fill
+            .lerp_to_gamma(v.widgets.hovered.bg_fill, hover),
+    );
+    let edge = Color32::from_black_alpha(200).lerp_to_gamma(style::ACCENT, hover);
     p.rect_stroke(rect, 0.0, Stroke::new(2.0, edge), StrokeKind::Outside);
     let inner = rect.shrink2(Vec2::new(14.0, 12.0));
     let text = v.strong_text_color();
@@ -142,12 +161,12 @@ fn tile(ui: &mut egui::Ui, title: &str, desc: &str) -> egui::Response {
         inner.left_top(),
         egui::Align2::LEFT_TOP,
         title,
-        style::pixel_font(18.0),
+        style::pixel_font(style::SIZE_TITLE),
         text,
     );
     let desc = p.layout(
         desc.to_string(),
-        egui::FontId::proportional(12.5),
+        egui::FontId::proportional(style::SIZE_BODY),
         v.weak_text_color(),
         inner.width(),
     );
@@ -161,6 +180,8 @@ enum CardAction {
     Edit,
     Duplicate,
     Delete,
+    /// Mover a una colección, o a la raíz con `None`.
+    Move(Option<String>),
 }
 
 pub(super) fn library_dir(s: &Settings) -> Option<PathBuf> {
@@ -182,6 +203,14 @@ pub(super) fn clear_thumb_cache() -> std::io::Result<()> {
     match thumbs_dir() {
         Some(d) if d.exists() => std::fs::remove_dir_all(d),
         _ => Ok(()),
+    }
+}
+
+fn sort_name(i: &I18n, s: library::Sort) -> String {
+    match s {
+        library::Sort::Favorites => i.tr("sort-favorites"),
+        library::Sort::Recent => i.tr("sort-recent"),
+        library::Sort::Name => i.tr("sort-name"),
     }
 }
 
@@ -223,6 +252,13 @@ fn cover_uv(tex: &TextureHandle, rect: Rect) -> Rect {
 }
 
 impl LibraryState {
+    /// Carpeta donde entran las skins nuevas: la colección abierta o la raíz.
+    pub fn current_dir(&self, root: &Path) -> PathBuf {
+        self.collection
+            .as_ref()
+            .map_or_else(|| root.to_path_buf(), |c| root.join(c))
+    }
+
     pub fn clear_thumbs(&mut self) {
         self.thumbs.clear();
     }
@@ -267,6 +303,13 @@ impl App {
                 log::error!("biblioteca {}: {e}", dir.display());
             }
             self.lib.entries = library::scan(&dir);
+            library::sort(&mut self.lib.entries, self.lib.sort);
+            self.lib.collections = library::collections(&dir);
+            if let Some(c) = &self.lib.collection
+                && !self.lib.collections.contains(c)
+            {
+                self.lib.collection = None;
+            }
             self.lib.stale = false;
         }
         self.load_thumbs(ui.ctx());
@@ -274,39 +317,121 @@ impl App {
         let i = &self.i18n;
         let mut start = None;
         ui.horizontal_wrapped(|ui| {
+            ui.add(icons::image(ui.ctx(), Icon::Search).tint(ui.visuals().weak_text_color()));
             ui.add(
                 egui::TextEdit::singleline(&mut self.lib.query)
                     .hint_text(i.tr("library-search"))
                     .desired_width(220.0),
             );
-            ui.toggle_value(&mut self.lib.only_favorites, i.tr("library-favorites"));
+            let star = if self.lib.only_favorites {
+                Icon::StarOn
+            } else {
+                Icon::Star
+            };
+            ui.toggle_value(
+                &mut self.lib.only_favorites,
+                (icons::image(ui.ctx(), star), i.tr("library-favorites")),
+            );
+            let sort_before = self.lib.sort;
+            egui::ComboBox::from_id_salt("library-sort")
+                .selected_text(sort_name(i, self.lib.sort))
+                .show_ui(ui, |ui| {
+                    for s in [
+                        library::Sort::Favorites,
+                        library::Sort::Recent,
+                        library::Sort::Name,
+                    ] {
+                        ui.selectable_value(&mut self.lib.sort, s, sort_name(i, s));
+                    }
+                })
+                .response
+                .on_hover_text(i.tr("library-sort"));
+            if self.lib.sort != sort_before {
+                library::sort(&mut self.lib.entries, self.lib.sort);
+            }
             ui.separator();
-            ui.menu_button(i.tr("library-new"), |ui| {
+            let new = egui::Button::image_and_text(
+                icons::image(ui.ctx(), Icon::Plus),
+                i.tr("library-new"),
+            )
+            .image_tint_follows_text_color(true);
+            egui::containers::menu::MenuButton::from_button(new).ui(ui, |ui| {
                 for (s, title, desc) in start_options(i) {
                     if ui.button(title).on_hover_text(desc).clicked() {
                         start = Some(s);
                     }
                 }
             });
-            if ui.button(i.tr("library-refresh")).clicked() {
+            if ui
+                .add(style::menu_button(ui, Icon::Reset, i.tr("library-refresh")))
+                .clicked()
+            {
                 self.lib.stale = true;
             }
         });
         ui.add(
             egui::Label::new(RichText::new(dir.display().to_string()).weak().small()).truncate(),
         );
+        let mut created = None;
+        ui.horizontal_wrapped(|ui| {
+            let mut pick = |ui: &mut egui::Ui, c: Option<String>, label: &str| {
+                let on = self.lib.collection == c;
+                let resp = style::tab(ui, None, label, on);
+                if on {
+                    style::slide_marker(ui, egui::Id::unique("collection-marker"), resp.rect);
+                }
+                if resp.clicked() {
+                    self.lib.collection = c;
+                }
+            };
+            pick(ui, None, &i.tr("collection-all"));
+            for c in self.lib.collections.clone() {
+                pick(ui, Some(c.clone()), &c);
+            }
+            let new = style::menu_button(ui, Icon::Plus, i.tr("collection-new"))
+                .frame_when_inactive(false);
+            egui::containers::menu::MenuButton::from_button(new).ui(ui, |ui| {
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.lib.new_collection)
+                        .hint_text(i.tr("collection-name-hint")),
+                );
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button(i.tr("collection-create")).clicked() || enter {
+                    created = Some(std::mem::take(&mut self.lib.new_collection));
+                    ui.close();
+                }
+            });
+        });
+        if let Some(name) = created {
+            match library::collection_name(&name) {
+                Some(name) => match std::fs::create_dir_all(dir.join(&name)) {
+                    Ok(()) => {
+                        self.lib.collection = Some(name);
+                        self.lib.stale = true;
+                    }
+                    Err(e) => self.error(
+                        self.i18n
+                            .tr_args("error-io", &[("detail", e.to_string().into())]),
+                    ),
+                },
+                None => self.error(self.i18n.tr("error-collection-name")),
+            }
+        }
         ui.separator();
         if self.lib.entries.is_empty() {
             start = start.or(self.welcome(ui));
         }
         if let Some(s) = start {
-            return self.start(s, &dir);
+            let target = self.lib.current_dir(&dir);
+            return self.start(s, &target);
         }
 
         let shown: Vec<usize> = (0..self.lib.entries.len())
             .filter(|&k| {
                 let e = &self.lib.entries[k];
-                (!self.lib.only_favorites || e.project.card.favorite) && e.matches(&self.lib.query)
+                (!self.lib.only_favorites || e.project.card.favorite)
+                    && (self.lib.collection.is_none() || e.collection == self.lib.collection)
+                    && e.matches(&self.lib.query)
             })
             .collect();
         if shown.is_empty() {
@@ -320,8 +445,11 @@ impl App {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::splat(16.0);
             ui.horizontal_wrapped(|ui| {
-                for k in shown {
-                    if let Some(a) = self.card(ui, k) {
+                for (n, k) in shown.into_iter().enumerate() {
+                    // Escalonadas, pero sin que una biblioteca grande tarde en aparecer.
+                    let delay = (n.min(12) as f64) * 0.035;
+                    let appear = style::appear(ui, self.lib.shown_at, delay, 0.25);
+                    if let Some(a) = self.card(ui, k, appear) {
                         action = Some((k, a));
                     }
                 }
@@ -339,7 +467,9 @@ impl App {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
-                ui.label(RichText::new(i.tr("home-title")).font(style::pixel_font(30.0)));
+                ui.label(
+                    RichText::new(i.tr("home-title")).font(style::pixel_font(style::SIZE_HERO)),
+                );
                 ui.add_space(6.0);
                 ui.label(i.tr("home-subtitle"));
                 ui.add_space(24.0);
@@ -355,7 +485,8 @@ impl App {
                     .spacing(Vec2::splat(20.0))
                     .show(ui, |ui| {
                         for (k, (s, title, desc)) in start_options(i).into_iter().enumerate() {
-                            if tile(ui, &title, &desc).clicked() {
+                            let appear = style::appear(ui, self.lib.shown_at, k as f64 * 0.05, 0.3);
+                            if tile(ui, &title, &desc, appear).clicked() {
                                 start = Some(s);
                             }
                             if (k + 1) % cols == 0 {
@@ -400,7 +531,7 @@ impl App {
         }
     }
 
-    fn card(&mut self, ui: &mut egui::Ui, k: usize) -> Option<CardAction> {
+    fn card(&mut self, ui: &mut egui::Ui, k: usize, appear: f32) -> Option<CardAction> {
         let w = self.settings.card_size;
         let pic_h = (w * 1.25).round();
         let info_h = 44.0;
@@ -418,14 +549,24 @@ impl App {
             e.modified.map(library::date).unwrap_or_default()
         );
         let v = ui.visuals().clone();
-        let painter = ui.painter_at(rect.expand(8.0));
+        let hover = ctx.animate_bool_with_time(
+            resp.id,
+            resp.hovered() || resp.has_focus(),
+            ui.style().animation_time,
+        );
+        let mut painter = ui.painter_at(rect.expand(16.0));
+        painter.multiply_opacity(appear);
+        let old_opacity = ui.opacity();
+        ui.multiply_opacity(appear);
 
-        // Sombra dura y marco de bloque.
+        // Sombra dura y marco de bloque. La tarjeta se levanta sobre la sombra con el cursor
+        // y entra desde abajo al aparecer; la zona que recibe el clic no se mueve.
         painter.rect_filled(
             rect.translate(Vec2::splat(5.0)),
             0.0,
             Color32::from_black_alpha(120),
         );
+        let rect = rect.translate(Vec2::new(-3.0 * hover, 14.0 * (1.0 - appear) - 3.0 * hover));
         let pic = Rect::from_min_size(rect.min, Vec2::new(w, pic_h));
         if let Some(tex) = self.lib.background(&ctx, &bg) {
             painter.image(tex.id(), pic, cover_uv(&tex, pic), Color32::WHITE);
@@ -446,11 +587,7 @@ impl App {
             [info.left_top(), info.right_top()],
             Stroke::new(2.0, Color32::from_black_alpha(160)),
         );
-        let edge = if resp.hovered() {
-            style::ACCENT
-        } else {
-            Color32::from_black_alpha(200)
-        };
+        let edge = Color32::from_black_alpha(200).lerp_to_gamma(style::ACCENT, hover);
         painter.rect_stroke(rect, 0.0, Stroke::new(2.0, edge), StrokeKind::Outside);
 
         let mut action = None;
@@ -459,20 +596,21 @@ impl App {
             |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
                 ui.add(
-                    egui::Label::new(RichText::new(&name).font(style::pixel_font(15.0))).truncate(),
+                    egui::Label::new(RichText::new(&name).font(style::pixel_font(style::SIZE_UI)))
+                        .truncate(),
                 );
                 ui.add(egui::Label::new(RichText::new(&sub).weak().small()).truncate());
             },
         );
         let i = &self.i18n;
-        let star = egui::Button::new(
-            RichText::new(if favorite { "★" } else { "☆" })
-                .size(18.0)
-                .color(if favorite {
+        let star = egui::Button::image(
+            icons::image(&ctx, if favorite { Icon::StarOn } else { Icon::Star }).tint(
+                if favorite {
                     style::ACCENT
                 } else {
                     Color32::WHITE
-                }),
+                },
+            ),
         )
         .frame(false);
         let star_rect = Rect::from_min_size(
@@ -488,8 +626,14 @@ impl App {
         }
         let more_rect = Rect::from_min_size(pic.min + Vec2::splat(4.0), Vec2::new(28.0, 22.0));
         let more = ui
-            .put(more_rect, egui::Button::new("⋯"))
+            .put(
+                more_rect,
+                egui::Button::image(icons::image(&ctx, Icon::More))
+                    .image_tint_follows_text_color(true),
+            )
             .on_hover_text(i.tr("card-more"));
+        let collections = &self.lib.collections;
+        let current = &self.lib.entries[k].collection;
         let menu = |ui: &mut egui::Ui, action: &mut Option<CardAction>| {
             for (a, label) in [
                 (CardAction::Open, i.tr("card-open")),
@@ -501,12 +645,27 @@ impl App {
                     *action = Some(a);
                 }
             }
+            if !collections.is_empty() {
+                ui.menu_button(i.tr("card-move"), |ui| {
+                    let targets = std::iter::once((None, i.tr("collection-none")))
+                        .chain(collections.iter().map(|c| (Some(c.clone()), c.clone())));
+                    for (c, label) in targets {
+                        if ui
+                            .add_enabled(c != *current, egui::Button::new(label))
+                            .clicked()
+                        {
+                            *action = Some(CardAction::Move(c));
+                        }
+                    }
+                });
+            }
         };
         egui::Popup::menu(&more).show(|ui| menu(ui, &mut action));
         resp.context_menu(|ui| menu(ui, &mut action));
         if resp.clicked() {
             action = Some(CardAction::Open);
         }
+        ui.set_opacity(old_opacity);
         resp.on_hover_text(&name);
         action
     }
@@ -527,7 +686,9 @@ impl App {
                 self.dialog = Some(Dialog::EditCard(path, draft));
             }
             CardAction::Duplicate => {
-                let target = library::free_path(dir, &self.lib.entries[k].name());
+                // La copia queda en la misma colección que el original.
+                let folder = path.parent().unwrap_or(dir);
+                let target = library::free_path(folder, &self.lib.entries[k].name());
                 match std::fs::copy(&path, &target) {
                     Ok(_) => self.lib.stale = true,
                     Err(e) => self.error(
@@ -540,6 +701,16 @@ impl App {
                 let name = self.lib.entries[k].name();
                 self.dialog = Some(Dialog::DeleteSkin(path, name));
             }
+            CardAction::Move(c) => match library::move_to(&path, dir, c.as_deref()) {
+                Ok(new) => {
+                    self.retarget_tab(&path, new);
+                    self.lib.stale = true;
+                }
+                Err(e) => self.error(
+                    self.i18n
+                        .tr_args("error-io", &[("detail", e.to_string().into())]),
+                ),
+            },
         }
     }
 

@@ -1,5 +1,6 @@
 //! Ventana principal: menús, panel de herramientas, lienzo 2D y diálogos.
 
+mod icons;
 mod library_view;
 mod settings_window;
 mod style;
@@ -13,12 +14,15 @@ use crate::editor::templates::{self, Template};
 use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
 use crate::project::{self, Card, Project, ProjectError};
-use crate::render3d::{Camera, Hit, PRESETS, Pose, Preset, Renderer3d, Scene, pick, project};
+use crate::render3d::{
+    Camera, FOV_DEG, Hit, PRESETS, Pose, Preset, Renderer3d, Scene, part_center, pick, project,
+};
 use crate::settings::{Action, NamedColor, Settings, Shortcut, StartView, Theme, View};
 use eframe::egui::{
     self, Color32, ColorImage, Key, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind,
     TextureHandle, TextureOptions, Vec2, color_picker, ecolor::Hsva,
 };
+use icons::Icon;
 use image::{Rgba, RgbaImage};
 use std::path::{Path, PathBuf};
 use style::ACCENT;
@@ -67,6 +71,12 @@ enum Dialog {
     ImportImage(Box<ImportState>),
     /// Ruta y nombre de la tarjeta.
     DeleteSkin(PathBuf, String),
+    /// Color a cambiar, color nuevo y si es solo en la parte seleccionada.
+    ReplaceColor(Hsva, Hsva, bool),
+    /// Lado en píxeles y fondo transparente.
+    Render(u32, bool),
+    /// Skins con cambios que quedaron de un cierre inesperado.
+    Recover(Vec<PathBuf>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -250,7 +260,9 @@ pub struct App {
     color: Hsva,
     texture: Option<TextureHandle>,
     texture_rev: Option<u64>,
-    preview: Option<TextureHandle>,
+    /// Diálogo de conversión: el personaje en 3D antes y después, y cuál se muestra.
+    convert_views: Option<[TextureHandle; 2]>,
+    convert_after: bool,
     painting: bool,
     last_px: Option<(u32, u32)>,
     /// Trazo en la vista 3D: último píxel pintado, última posición del cursor y la skin
@@ -281,6 +293,15 @@ pub struct App {
     stamp: Option<RgbaImage>,
     /// Partes copiadas; se conservan al abrir otro archivo para pegarlas en él.
     clip: Option<(Skin, PartMask)>,
+    /// Arrastre con clic izquierdo que empezó fuera del personaje en la vista 3D.
+    panning: bool,
+    /// Lado del pincel (1 o 2).
+    brush: u32,
+    /// Último punto de un trazo en 2D, para la línea recta con Shift.
+    line_from: Option<(u32, u32)>,
+    /// Escala de la interfaz ya aplicada a egui.
+    applied_scale: f32,
+    last_recovery: f64,
     /// Acción que espera una tecla en Ajustes → Atajos.
     binding: Option<Action>,
     bind_msg: String,
@@ -336,7 +357,8 @@ impl App {
             color: Hsva::from_srgba_unmultiplied([196, 92, 52, 255]),
             texture: None,
             texture_rev: None,
-            preview: None,
+            convert_views: None,
+            convert_after: true,
             painting: false,
             last_px: None,
             last_hit: None,
@@ -368,11 +390,27 @@ impl App {
             drag_from: None,
             stamp: None,
             clip: None,
+            panning: false,
+            brush: 1,
+            line_from: None,
+            applied_scale: 0.0,
+            last_recovery: 0.0,
             binding: None,
             bind_msg: String::new(),
             new_color_name: String::new(),
         };
         app.tool = start_tool;
+        let leftovers: Vec<PathBuf> = recovery_dir()
+            .and_then(|d| std::fs::read_dir(d).ok())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "png"))
+            .collect();
+        if !leftovers.is_empty() {
+            app.dialog = Some(Dialog::Recover(leftovers));
+        }
         let from_args = std::env::args_os().nth(1).is_some();
         if let Some(path) = last.filter(|p| p.exists())
             && app.open_path(path)
@@ -380,7 +418,7 @@ impl App {
             && app.settings.view == View::Library
         {
             // Abrir un archivo desde el explorador lleva directo al editor.
-            app.settings.view = View::Flat;
+            app.settings.view = View::ThreeD;
         }
         app
     }
@@ -508,6 +546,20 @@ impl App {
         }
     }
 
+    /// Un archivo abierto se movió: su pestaña pasa a guardar en la ruta nueva.
+    fn retarget_tab(&mut self, old: &Path, new: PathBuf) {
+        if let Some(i) = (0..self.tabs.len()).find(|&i| self.tab_path(i) == Some(old)) {
+            if i == self.active {
+                self.path = Some(new.clone());
+            } else {
+                self.tabs[i].path = Some(new.clone());
+            }
+        }
+        if self.settings.last_file.as_deref() == Some(old) {
+            self.remember_file(&new);
+        }
+    }
+
     /// Una pestaña sin archivo, sin cambios y sin historial: se puede reutilizar al abrir.
     fn active_is_untouched(&self) -> bool {
         self.path.is_none() && !self.editor.is_dirty() && !self.editor.can_undo()
@@ -517,6 +569,7 @@ impl App {
         let mut switch = None;
         let mut close = None;
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
             for i in 0..self.tabs.len() {
                 let name = self
                     .tab_path(i)
@@ -526,24 +579,31 @@ impl App {
                 } else {
                     name
                 };
-                let tab = ui.selectable_label(i == self.active, label);
+                let tab = style::tab(ui, None, &label, i == self.active);
+                if i == self.active {
+                    style::slide_marker(ui, egui::Id::unique("tab-marker"), tab.rect);
+                }
                 if tab.clicked() {
                     switch = Some(i);
                 }
                 if tab.middle_clicked() {
                     close = Some(i);
                 }
-                if ui
-                    .small_button("×")
-                    .on_hover_text(self.i18n.tr("tab-close"))
-                    .clicked()
-                {
+                let x = egui::Button::image(
+                    icons::image(ctx, Icon::Close).fit_to_exact_size(Vec2::splat(12.0)),
+                )
+                .image_tint_follows_text_color(true)
+                .frame_when_inactive(false);
+                if ui.add(x).on_hover_text(self.i18n.tr("tab-close")).clicked() {
                     close = Some(i);
                 }
-                ui.separator();
+                ui.add_space(10.0);
             }
+            let plus = egui::Button::image(icons::image(ctx, Icon::Plus))
+                .image_tint_follows_text_color(true)
+                .frame_when_inactive(false);
             if ui
-                .small_button("+")
+                .add(plus)
                 .on_hover_text(self.i18n.tr("file-new"))
                 .clicked()
             {
@@ -585,8 +645,8 @@ impl App {
             Ok(project) => {
                 // Un PNG suelto se importa sin ruta, para que "Guardar" no lo sobrescriba sin
                 // preguntar. Los de la biblioteca sí la conservan: ya son copias de la app.
-                let in_library = library_view::library_dir(&self.settings)
-                    .is_some_and(|d| path.parent() == Some(d.as_path()));
+                let in_library =
+                    library_view::library_dir(&self.settings).is_some_and(|d| path.starts_with(d));
                 let is_project = project::is_project(&bytes) || in_library;
                 let key = if is_project {
                     "status-opened"
@@ -624,16 +684,23 @@ impl App {
             (!i.raw.hovered_files.is_empty(), paths)
         });
         let library = self.settings.view == View::Library;
-        if hovering {
+        let shown = ctx.animate_bool_with_time(
+            egui::Id::unique("drop-fade"),
+            hovering,
+            ctx.global_style().animation_time,
+        );
+        if shown > 0.0 {
             let key = if library { "drop-library" } else { "drop-open" };
             let rect = ctx.content_rect();
-            let painter = ctx.layer_painter(egui::LayerId::new(
+            let mut painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::unique("drop"),
             ));
+            painter.multiply_opacity(shown);
             painter.rect_filled(rect, 0.0, Color32::from_black_alpha(170));
+            // El marco se acerca desde afuera mientras aparece.
             painter.rect_stroke(
-                rect.shrink(12.0),
+                rect.shrink(12.0 + 12.0 * (1.0 - shown)),
                 0.0,
                 Stroke::new(3.0, ACCENT),
                 StrokeKind::Inside,
@@ -642,7 +709,7 @@ impl App {
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 self.i18n.tr(key),
-                style::pixel_font(32.0),
+                style::pixel_font(style::SIZE_HERO),
                 Color32::WHITE,
             );
         }
@@ -655,6 +722,7 @@ impl App {
         if library {
             if let Some(dir) = library_view::library_dir(&self.settings) {
                 if !skins.is_empty() {
+                    let dir = self.lib.current_dir(&dir);
                     self.import_files(&dir, skins);
                 }
                 if !others.is_empty() {
@@ -827,6 +895,64 @@ impl App {
         self.last_autosave = now;
     }
 
+    /// Cada minuto copia las pestañas con cambios a la carpeta de recuperación, aunque no
+    /// tengan archivo. Al cerrar bien la app se borra; si queda algo, el cierre fue inesperado.
+    fn write_recovery(&mut self, ctx: &egui::Context) {
+        ctx.request_repaint_after(std::time::Duration::from_secs(60));
+        let now = ctx.input(|i| i.time);
+        // Mientras se pregunta si recuperar, no se pisa lo que quedó de la vez anterior.
+        if now - self.last_recovery < 60.0
+            || self.painting
+            || matches!(self.dialog, Some(Dialog::Recover(_)))
+        {
+            return;
+        }
+        self.last_recovery = now;
+        let Some(dir) = recovery_dir() else {
+            return;
+        };
+        // shortcut: una sola carpeta para todas las ventanas de la app; con dos abiertas a la
+        // vez, la última que escribe gana. Usar una subcarpeta por proceso si llega a importar.
+        let _ = std::fs::remove_dir_all(&dir);
+        let active = std::iter::once((&self.editor, &self.card));
+        let others = (0..self.tabs.len())
+            .filter(|&i| i != self.active)
+            .map(|i| (&self.tabs[i].editor, &self.tabs[i].card));
+        for (k, (editor, card)) in active.chain(others).enumerate() {
+            if !editor.is_dirty() {
+                continue;
+            }
+            let file = dir.join(format!("{k}.png"));
+            let written = std::fs::create_dir_all(&dir).and_then(|()| {
+                std::fs::write(&file, project::save(editor.skin(), editor.pose(), card))
+            });
+            if let Err(e) = written {
+                log::warn!("recuperación {}: {e}", file.display());
+            }
+        }
+    }
+
+    /// Abre como pestañas nuevas, sin archivo y con cambios, las skins de la recuperación.
+    fn recover(&mut self, files: &[PathBuf]) {
+        let mut count = 0;
+        for f in files {
+            match std::fs::read(f)
+                .map_err(|e| e.to_string())
+                .and_then(|b| project::load(&b).map_err(|e| format!("{e:?}")))
+            {
+                Ok(p) => {
+                    self.new_tab(p, None);
+                    self.editor.mark_unsaved();
+                    count += 1;
+                }
+                Err(e) => log::warn!("no se recuperó {}: {e}", f.display()),
+            }
+        }
+        self.status = self
+            .i18n
+            .tr_args("status-recovered", &[("count", count.into())]);
+    }
+
     fn error(&mut self, msg: String) {
         log::error!("{msg}");
         self.status = self
@@ -913,6 +1039,26 @@ impl App {
             Action::Gradient => self.tool = Tool::Gradient,
             Action::Stamp => self.tool = Tool::Stamp,
             Action::Select => self.tool = Tool::Select,
+            Action::Lighten => self.tool = Tool::Lighten,
+            Action::Darken => self.tool = Tool::Darken,
+            Action::ToggleOverlay => {
+                let shown = PARTS
+                    .iter()
+                    .any(|&p| self.editor.is_visible(p, Layer::Overlay));
+                for p in PARTS {
+                    self.editor.set_visible(p, Layer::Overlay, !shown);
+                }
+            }
+            Action::ViewFront => self.set_camera(self.camera.facing(0.0)),
+            Action::ViewBack => self.set_camera(self.camera.facing(180.0)),
+            Action::ViewSide => self.set_camera(self.camera.facing(90.0)),
+            Action::FocusPart => {
+                if let Some(p) = self.selected {
+                    let mut cam = self.camera;
+                    cam.focus(part_center(p, self.editor.pose(), self.editor.skin().model));
+                    self.set_camera(cam);
+                }
+            }
             Action::ToggleMirror => {
                 self.mirror = if self.mirror == MirrorMode::Off {
                     MirrorMode::All
@@ -939,13 +1085,25 @@ impl App {
                 self.editor.selection().is_some()
             }
             Action::PasteParts => self.clip.is_some(),
+            Action::FocusPart => self.selected.is_some(),
             _ => true,
+        }
+    }
+
+    /// Pone la cámara y, si se está en la biblioteca o en 2D, pasa a la vista 3D.
+    fn set_camera(&mut self, cam: Camera) {
+        self.camera = cam;
+        if !matches!(self.settings.view, View::ThreeD | View::Preview) {
+            self.settings.view = View::ThreeD;
+            self.settings_changed = true;
         }
     }
 
     /// Entrada de menú con su atajo a la derecha.
     fn menu_item(&mut self, ui: &mut egui::Ui, action: Action) {
-        let mut button = egui::Button::new(action_name(&self.i18n, action));
+        let name = action_name(&self.i18n, action);
+        // Sin ícono propio, uno vacío: así todos los textos del menú quedan alineados.
+        let mut button = style::menu_button(ui, action_icon(action).unwrap_or(Icon::Blank), name);
         if let Some(sc) = self.settings.shortcut(action) {
             button = button.shortcut_text(shortcut_label(&self.i18n, &sc));
         }
@@ -971,7 +1129,14 @@ impl App {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button(self.i18n.tr("menu-file"), |ui| {
                 self.menu_item(ui, Action::New);
-                if ui.button(self.i18n.tr("file-new-base")).clicked() {
+                if ui
+                    .add(style::menu_button(
+                        ui,
+                        Icon::New,
+                        self.i18n.tr("file-new-base"),
+                    ))
+                    .clicked()
+                {
                     let skin = Skin {
                         pixels: templates::draw(Template::Base, Model::Steve, self.primary()),
                         model: Model::Steve,
@@ -1003,8 +1168,43 @@ impl App {
                 self.menu_item(ui, Action::CopyParts);
                 self.menu_item(ui, Action::PasteParts);
                 ui.separator();
-                if ui.button(self.i18n.tr("edit-image-front")).clicked() {
+                if ui
+                    .add(style::menu_button(
+                        ui,
+                        Icon::Open,
+                        self.i18n.tr("edit-image-front"),
+                    ))
+                    .clicked()
+                {
                     self.import_image();
+                }
+                if ui
+                    .add(style::menu_button(
+                        ui,
+                        Icon::Swap,
+                        self.i18n.tr("edit-replace-color"),
+                    ))
+                    .clicked()
+                {
+                    self.dialog = Some(Dialog::ReplaceColor(
+                        self.color,
+                        self.color2,
+                        self.selected.is_some(),
+                    ));
+                }
+                if ui
+                    .add(style::menu_button(
+                        ui,
+                        Icon::Noise,
+                        self.i18n.tr("edit-vary"),
+                    ))
+                    .on_hover_text(self.i18n.tr("edit-vary-hint"))
+                    .clicked()
+                {
+                    // Con selección, la selección; si no, la parte elegida o toda la skin.
+                    let part = self.selected.filter(|_| self.editor.selection().is_none());
+                    let seed = ui.input(|i| i.time).to_bits();
+                    self.editor.vary(part, 10, seed);
                 }
                 ui.menu_button(self.i18n.tr("edit-apply-template"), |ui| {
                     ui.weak(self.i18n.tr("template-color-note"));
@@ -1022,7 +1222,29 @@ impl App {
                     }
                 });
             });
-            if ui.button(self.i18n.tr("menu-settings")).clicked() {
+            ui.menu_button(self.i18n.tr("menu-view"), |ui| {
+                self.menu_item(ui, Action::ToggleOverlay);
+                ui.separator();
+                for a in [
+                    Action::ViewFront,
+                    Action::ViewBack,
+                    Action::ViewSide,
+                    Action::FocusPart,
+                ] {
+                    self.menu_item(ui, a);
+                }
+                ui.separator();
+                let label = self.i18n.tr("view-split");
+                if ui
+                    .add(egui::Checkbox::new(&mut self.settings.split_view, label))
+                    .changed()
+                {
+                    self.settings_changed = true;
+                }
+            });
+            let settings = style::menu_button(ui, Icon::Settings, self.i18n.tr("menu-settings"))
+                .frame_when_inactive(false);
+            if ui.add(settings).clicked() {
                 self.show_settings = true;
             }
         });
@@ -1038,7 +1260,20 @@ impl App {
             let mark = if self.editor.is_dirty() { " •" } else { "" };
             ui.label(format!("{name}{mark}"));
             ui.separator();
-            ui.label(&self.status);
+            let id = egui::Id::unique("status-since");
+            let now = ui.input(|i| i.time);
+            let (text, since) = ui
+                .data(|d| d.get_temp::<(String, f64)>(id))
+                .unwrap_or_default();
+            let since = if text == self.status {
+                since
+            } else {
+                ui.data_mut(|d| d.insert_temp(id, (self.status.clone(), now)));
+                now
+            };
+            let t = style::appear(ui, since, 0.0, 1.2);
+            let color = ACCENT.lerp_to_gamma(ui.visuals().text_color(), t);
+            ui.label(egui::RichText::new(&self.status).color(color));
         });
     }
 
@@ -1059,7 +1294,7 @@ impl App {
     /// Ajuste fino de la articulación de la parte seleccionada.
     fn side_joint(&mut self, ui: &mut egui::Ui) {
         let i = &self.i18n;
-        ui.heading(i.tr("joint-title"));
+        style::section(ui, Icon::Cube, &i.tr("joint-title"));
         let Some(part) = self.selected else {
             ui.weak(i.tr("joint-hint"));
             return;
@@ -1088,8 +1323,10 @@ impl App {
 
     fn side_tools(&mut self, ui: &mut egui::Ui) {
         let i = &self.i18n;
-        ui.heading(i.tr("tools"));
+        style::section(ui, Icon::Pencil, &i.tr("tools"));
+        let mut current = String::new();
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::splat(4.0);
             for (tool, action) in [
                 (Tool::Pencil, Action::Pencil),
                 (Tool::Eraser, Action::Eraser),
@@ -1098,17 +1335,38 @@ impl App {
                 (Tool::Gradient, Action::Gradient),
                 (Tool::Stamp, Action::Stamp),
                 (Tool::Select, Action::Select),
+                (Tool::Lighten, Action::Lighten),
+                (Tool::Darken, Action::Darken),
             ] {
-                let mut resp = ui.selectable_value(&mut self.tool, tool, action_name(i, action));
-                if let Some(sc) = self.settings.shortcut(action) {
-                    resp = resp.on_hover_text(shortcut_label(i, &sc));
+                let name = action_name(i, action);
+                let tip = match self.settings.shortcut(action) {
+                    Some(sc) => format!("{name} ({})", shortcut_label(i, &sc)),
+                    None => name.clone(),
+                };
+                let icon = action_icon(action).unwrap_or(Icon::Pencil);
+                let resp = style::icon_button(ui, icon, self.tool == tool, &tip);
+                if resp.clicked() {
+                    self.tool = tool;
                 }
                 if tool == Tool::Stamp && self.stamp.is_none() {
                     resp.on_hover_text(i.tr("stamp-empty"));
                 }
+                if self.tool == tool {
+                    current = name;
+                }
             }
         });
+        ui.label(egui::RichText::new(current).font(style::pixel_font(style::SIZE_UI)));
+        ui.horizontal(|ui| {
+            ui.label(i.tr("brush-size"));
+            ui.selectable_value(&mut self.brush, 1, "1×1");
+            ui.selectable_value(&mut self.brush, 2, "2×2");
+        })
+        .response
+        .on_hover_text(i.tr("brush-hint"));
+        ui.weak(i.tr("line-hint"));
         ui.horizontal_wrapped(|ui| {
+            ui.add(icons::image(ui.ctx(), Icon::Mirror).tint(ui.visuals().text_color()));
             ui.label(i.tr("mirror"));
             ui.selectable_value(&mut self.mirror, MirrorMode::Off, i.tr("mirror-off"));
             ui.selectable_value(&mut self.mirror, MirrorMode::All, i.tr("mirror-all"));
@@ -1121,7 +1379,7 @@ impl App {
 
     fn side_colors(&mut self, ui: &mut egui::Ui) {
         let i = &self.i18n;
-        ui.heading(i.tr("color"));
+        style::section(ui, Icon::Fill, &i.tr("color"));
         ui.horizontal(|ui| {
             color_picker::color_edit_button_hsva(
                 ui,
@@ -1151,7 +1409,14 @@ impl App {
                 color_picker::Alpha::OnlyBlend,
             )
             .on_hover_text(i.tr("color-secondary"));
-            if ui.button(action_name(i, Action::SwapColors)).clicked() {
+            if ui
+                .add(style::menu_button(
+                    ui,
+                    Icon::Swap,
+                    action_name(i, Action::SwapColors),
+                ))
+                .clicked()
+            {
                 std::mem::swap(&mut self.color, &mut self.color2);
             }
         });
@@ -1266,12 +1531,13 @@ impl App {
             .button(i.tr_args("model-convert", &[("model", format!("{other:?}").into())]))
             .clicked()
         {
-            self.preview = None;
+            self.convert_views = None;
+            self.convert_after = true;
             self.dialog = Some(Dialog::Convert(convert_model(self.editor.skin(), other)));
         }
         ui.separator();
 
-        ui.heading(i.tr("layers"));
+        style::section(ui, Icon::Library, &i.tr("layers"));
         let layer_names = [i.tr("layer-base"), i.tr("layer-overlay")];
         egui::Grid::new("visibility").show(ui, |ui| {
             ui.label("");
@@ -1332,11 +1598,24 @@ impl App {
         let view3d = matches!(before, View::ThreeD | View::Preview);
         ui.horizontal_wrapped(|ui| {
             let i = &self.i18n;
-            ui.selectable_value(&mut self.settings.view, View::Library, i.tr("view-library"));
-            ui.separator();
-            ui.selectable_value(&mut self.settings.view, View::Flat, i.tr("view-2d"));
-            ui.selectable_value(&mut self.settings.view, View::ThreeD, i.tr("view-3d"));
-            ui.selectable_value(&mut self.settings.view, View::Preview, i.tr("view-preview"));
+            for (view, icon, key) in [
+                (View::Library, Icon::Library, "view-library"),
+                (View::ThreeD, Icon::Cube, "view-3d"),
+                (View::Flat, Icon::Flat, "view-2d"),
+                (View::Preview, Icon::Preview, "view-preview"),
+            ] {
+                let on = self.settings.view == view;
+                let resp = style::tab(ui, Some(icon), &i.tr(key), on);
+                if on {
+                    style::slide_marker(ui, egui::Id::unique("view-marker"), resp.rect);
+                }
+                if resp.clicked() {
+                    self.settings.view = view;
+                }
+                if view == View::Library {
+                    ui.separator();
+                }
+            }
             if view3d {
                 ui.separator();
                 ui.label(i.tr("pose"));
@@ -1355,7 +1634,10 @@ impl App {
                 if let Some(p) = chosen {
                     self.editor.set_pose(p.pose());
                 }
-                ui.toggle_value(&mut self.anim.playing, i.tr("anim-play"));
+                ui.toggle_value(
+                    &mut self.anim.playing,
+                    (icons::image(ui.ctx(), Icon::Play), i.tr("anim-play")),
+                );
                 if self.anim.playing {
                     let shown = self
                         .anim
@@ -1379,11 +1661,17 @@ impl App {
                         egui::Slider::new(&mut self.anim.speed, 0.2..=3.0).text(i.tr("anim-speed")),
                     );
                 }
-                if ui.button(i.tr("view-reset")).clicked() {
+                if ui
+                    .add(style::menu_button(ui, Icon::Reset, i.tr("view-reset")))
+                    .clicked()
+                {
                     self.camera = Camera::default();
                 }
-                if ui.button(i.tr("capture")).clicked() {
-                    self.capture();
+                if ui
+                    .add(style::menu_button(ui, Icon::Camera, i.tr("capture")))
+                    .clicked()
+                {
+                    self.dialog = Some(Dialog::Render(1024, true));
                 }
             }
         });
@@ -1395,12 +1683,28 @@ impl App {
             // Al entrar a la biblioteca se vuelve a leer la carpeta: puede haber cambiado afuera.
             if self.settings.view == View::Library {
                 self.lib.stale = true;
+                self.lib.shown_at = ui.input(|i| i.time);
             }
         }
         ui.separator();
         match self.settings.view {
             View::Library => self.library(ui),
-            View::Flat => self.canvas(ui),
+            View::Flat => self.canvas(ui, self.settings.pixel_size),
+            View::ThreeD if self.settings.split_view => {
+                // 3D a la izquierda; a la derecha, el lienzo 2D del tamaño que entre.
+                let avail = ui.available_size();
+                let left = Vec2::new((avail.x * 0.62).floor(), avail.y);
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui(left, |ui| self.view3d(ui, false));
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        let px = ((ui.available_width() - 16.0) / 64.0)
+                            .floor()
+                            .clamp(2.0, self.settings.pixel_size);
+                        self.canvas(ui, px);
+                    });
+                });
+            }
             View::ThreeD => self.view3d(ui, false),
             View::Preview => self.view3d(ui, true),
         }
@@ -1453,6 +1757,52 @@ impl App {
         if load_cape {
             self.load_preview_cape();
         }
+    }
+
+    /// El personaje actual y `after`, de tres cuartos y de pie, para comparar en un diálogo.
+    /// Sin vista 3D se muestran las texturas planas.
+    fn model_views(&mut self, ctx: &egui::Context, after: &Skin) -> [TextureHandle; 2] {
+        let camera = Camera::thumbnail();
+        let pose = Pose::default();
+        let lighting = self.settings.lighting;
+        let renderer = self.renderer.as_ref();
+        let shot = |skin: &Skin, name: &str| {
+            let img = renderer.and_then(|r| {
+                r.upload_skin(&skin.pixels);
+                r.capture(
+                    320,
+                    &Scene {
+                        model: skin.model,
+                        pose: &pose,
+                        camera: &camera,
+                        selected: None,
+                        visible: &|_, _| true,
+                        cape: false,
+                        lighting,
+                    },
+                )
+            });
+            match img {
+                Some(img) => ctx.load_texture(
+                    name,
+                    ColorImage::from_rgba_unmultiplied(
+                        [img.width() as usize, img.height() as usize],
+                        img.as_raw(),
+                    ),
+                    TextureOptions::LINEAR,
+                ),
+                None => {
+                    ctx.load_texture(name, skin_image(skin, |_, _| true), TextureOptions::NEAREST)
+                }
+            }
+        };
+        let views = [
+            shot(self.editor.skin(), "convert-before"),
+            shot(after, "convert-after"),
+        ];
+        // La skin en la GPU cambió: la vista 3D tiene que volver a subirla.
+        self.uploaded = None;
+        views
     }
 
     fn read_png(&mut self) -> Option<(PathBuf, Vec<u8>)> {
@@ -1561,10 +1911,36 @@ impl App {
         }
         self.sync_3d(preview);
         let (area, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        // Clic izquierdo fuera del personaje: arrastrar lo desplaza (cámara libre).
+        if resp.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
+            self.panning = resp
+                .interact_pointer_pos()
+                .or(resp.hover_pos())
+                .is_some_and(|p| self.hit_3d(area, p).is_none());
+        }
+        if self.panning && resp.dragged_by(PointerButton::Primary) {
+            // Píxeles de pantalla a píxeles de la skin a la distancia del personaje.
+            let k = 2.0 * self.camera.distance * (FOV_DEG.to_radians() / 2.0).tan()
+                / area.height().max(1.0);
+            let d = resp.drag_delta() * k;
+            let [x, y] = self.camera.pan;
+            self.camera.pan = [
+                (x + d.x).clamp(-PAN_MAX, PAN_MAX),
+                (y - d.y).clamp(-PAN_MAX, PAN_MAX),
+            ];
+        }
+        // Un clic sin arrastrar fuera del personaje quita la selección de parte.
+        if self.panning && resp.clicked() && !preview {
+            self.selected = None;
+        }
+        let panning = self.panning;
+        if !ui.input(|i| i.pointer.primary_down()) {
+            self.panning = false;
+        }
         // En el editor el botón izquierdo pinta; se gira con el derecho o la rueda presionada.
         let rotating = resp.dragged_by(PointerButton::Secondary)
             || resp.dragged_by(PointerButton::Middle)
-            || (preview && resp.dragged_by(PointerButton::Primary));
+            || (preview && !panning && resp.dragged_by(PointerButton::Primary));
         if rotating {
             let d = resp.drag_delta() * 0.5 * self.settings.rotate_speed;
             self.camera.yaw += d.x;
@@ -1572,7 +1948,7 @@ impl App {
         }
         if resp.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            self.camera.distance = (self.camera.distance - scroll * 0.1).clamp(30.0, 160.0);
+            self.camera.distance = (self.camera.distance - scroll * 0.1).clamp(16.0, 160.0);
         }
         let aspect = area.width() / area.height().max(1.0);
         let painter = ui.painter_at(area);
@@ -1600,7 +1976,7 @@ impl App {
             }
         }
         // Con la animación en marcha no se pinta: el modelo no está en la pose de la skin.
-        let hover = if preview || self.anim.playing {
+        let hover = if preview || self.anim.playing || panning {
             None
         } else {
             self.paint_3d(ui, &resp, area)
@@ -1690,7 +2066,7 @@ impl App {
         }
         self.sync_mirror();
         match self.tool {
-            Tool::Pencil | Tool::Eraser => {
+            Tool::Pencil | Tool::Eraser | Tool::Lighten | Tool::Darken => {
                 let down =
                     resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
                 if down && !self.painting {
@@ -1711,11 +2087,6 @@ impl App {
                 if !self.painting {
                     return hover;
                 }
-                let color = if self.tool == Tool::Eraser {
-                    ERASE
-                } else {
-                    self.primary()
-                };
                 let Some(pos) = resp.interact_pointer_pos() else {
                     return hover;
                 };
@@ -1730,7 +2101,7 @@ impl App {
                             .last_hit
                             .filter(|l| (l.part, l.layer, l.face) == (h.part, h.layer, h.face))
                             .map_or((h.x, h.y), |l| (l.x, l.y));
-                        self.editor.paint_line(start, (h.x, h.y), color);
+                        self.stroke_segment(start, (h.x, h.y));
                     }
                     self.last_hit = hit;
                 }
@@ -1754,7 +2125,8 @@ impl App {
         hover
     }
 
-    fn capture(&mut self) {
+    /// Guarda la vista 3D en PNG, de `size` píxeles de lado. Con `bg`, sobre ese color.
+    fn capture(&mut self, size: u32, bg: Option<Color32>) {
         if self.renderer.is_none() {
             return;
         }
@@ -1776,9 +2148,21 @@ impl App {
             lighting: self.settings.lighting,
         };
         let renderer = self.renderer.as_ref().expect("comprobado arriba");
-        let Some(img) = renderer.capture(1024, &scene) else {
+        let Some(mut img) = renderer.capture(size, &scene) else {
             return self.error(self.i18n.tr("error-capture"));
         };
+        if let Some(bg) = bg {
+            for px in img.pixels_mut() {
+                let a = px[3] as f32 / 255.0;
+                let mix = |c: u8, b: u8| (c as f32 * a + b as f32 * (1.0 - a)).round() as u8;
+                *px = Rgba([
+                    mix(px[0], bg.r()),
+                    mix(px[1], bg.g()),
+                    mix(px[2], bg.b()),
+                    255,
+                ]);
+            }
+        }
         let result = img
             .save_with_format(&path, image::ImageFormat::Png)
             .map_err(|e| e.to_string());
@@ -1792,9 +2176,9 @@ impl App {
         }
     }
 
-    fn canvas(&mut self, ui: &mut egui::Ui) {
+    /// Lienzo 2D con píxeles de `px` puntos.
+    fn canvas(&mut self, ui: &mut egui::Ui, px: f32) {
         self.update_texture(ui.ctx());
-        let px = self.settings.pixel_size;
         egui::ScrollArea::both().show(ui, |ui| {
             let (area, resp) =
                 ui.allocate_exact_size(Vec2::splat(64.0 * px), Sense::click_and_drag());
@@ -1949,11 +2333,22 @@ impl App {
     }
 
     fn sync_mirror(&mut self) {
+        self.editor.set_brush(self.brush);
         self.editor.set_mirror(match self.mirror {
             MirrorMode::Off => Mirror::Off,
             MirrorMode::All => Mirror::All,
             MirrorMode::Selected => self.selected.map_or(Mirror::Off, Mirror::Part),
         });
+    }
+
+    /// Un tramo del trazo en curso con la herramienta activa.
+    fn stroke_segment(&mut self, from: (u32, u32), to: (u32, u32)) {
+        match self.tool {
+            Tool::Lighten => self.editor.shade_line(from, to, true),
+            Tool::Darken => self.editor.shade_line(from, to, false),
+            Tool::Eraser => self.editor.paint_line(from, to, ERASE),
+            _ => self.editor.paint_line(from, to, self.primary()),
+        }
     }
 
     fn handle_canvas_input(
@@ -1964,13 +2359,15 @@ impl App {
     ) {
         self.sync_mirror();
         match self.tool {
-            Tool::Pencil | Tool::Eraser => {
+            Tool::Pencil | Tool::Eraser | Tool::Lighten | Tool::Darken => {
                 let down = resp.is_pointer_button_down_on()
                     && resp.ctx.input(|i| i.pointer.primary_down());
                 if down && !self.painting {
                     self.editor.begin_stroke();
                     self.painting = true;
-                    self.last_px = None;
+                    // Con Shift, el trazo empieza con una recta desde el último punto pintado.
+                    let shift = resp.ctx.input(|i| i.modifiers.shift);
+                    self.last_px = self.line_from.filter(|_| shift);
                     if self.tool == Tool::Pencil {
                         self.remember(self.primary());
                     }
@@ -1981,15 +2378,11 @@ impl App {
                 if !down {
                     self.editor.end_stroke();
                     self.painting = false;
+                    self.line_from = self.last_px;
                     return;
                 }
-                let color = if self.tool == Tool::Eraser {
-                    ERASE
-                } else {
-                    self.primary()
-                };
                 if let Some(p) = at {
-                    self.editor.paint_line(self.last_px.unwrap_or(p), p, color);
+                    self.stroke_segment(self.last_px.unwrap_or(p), p);
                 }
                 self.last_px = at;
             }
@@ -2053,6 +2446,11 @@ impl App {
         let Some(dialog) = self.dialog.take() else {
             return;
         };
+        if let Dialog::Convert(skin) = &dialog
+            && self.convert_views.is_none()
+        {
+            self.convert_views = Some(self.model_views(ctx, skin));
+        }
         let i = &self.i18n;
         let buttons = |ui: &mut egui::Ui, labels: &[(Choice, String)]| {
             let mut picked = None;
@@ -2086,27 +2484,19 @@ impl App {
                     &[("model", format!("{:?}", skin.model).into())],
                 ));
                 ui.label(i.tr("convert-note"));
-                let preview = self.preview.get_or_insert_with(|| {
-                    ctx.load_texture(
-                        "preview",
-                        skin_image(skin, |_, _| true),
-                        TextureOptions::NEAREST,
-                    )
-                });
-                let before = self.texture.as_ref().map(|t| t.id());
+                // Un solo personaje; el selector cambia entre antes y después en el mismo lugar.
                 ui.horizontal(|ui| {
-                    for (label, tex) in [
-                        (i.tr("convert-before"), before),
-                        (i.tr("convert-after"), Some(preview.id())),
-                    ] {
-                        ui.vertical(|ui| {
-                            ui.label(label);
-                            if let Some(tex) = tex {
-                                ui.image((tex, Vec2::splat(256.0)));
-                            }
-                        });
-                    }
+                    ui.selectable_value(&mut self.convert_after, false, i.tr("convert-before"));
+                    ui.selectable_value(&mut self.convert_after, true, i.tr("convert-after"));
                 });
+                if let Some(views) = &self.convert_views {
+                    ui.vertical_centered(|ui| {
+                        ui.image((
+                            views[usize::from(self.convert_after)].id(),
+                            Vec2::splat(300.0),
+                        ));
+                    });
+                }
                 buttons(
                     ui,
                     &[
@@ -2216,6 +2606,62 @@ impl App {
                     ],
                 )
             }
+            Dialog::ReplaceColor(from, to, part_only) => {
+                ui.heading(i.tr("replace-title"));
+                egui::Grid::new("replace").num_columns(2).show(ui, |ui| {
+                    ui.label(i.tr("replace-from"));
+                    color_picker::color_edit_button_hsva(ui, from, color_picker::Alpha::OnlyBlend);
+                    ui.end_row();
+                    ui.label(i.tr("replace-to"));
+                    color_picker::color_edit_button_hsva(ui, to, color_picker::Alpha::OnlyBlend);
+                    ui.end_row();
+                });
+                ui.radio_value(part_only, false, i.tr("replace-scope-all"));
+                if let Some(p) = self.selected {
+                    let part = part_name(i, p);
+                    ui.radio_value(
+                        part_only,
+                        true,
+                        i.tr_args("replace-scope-part", &[("part", part.into())]),
+                    );
+                } else {
+                    *part_only = false;
+                }
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("replace-apply")),
+                        (Choice::Cancel, i.tr("cancel")),
+                    ],
+                )
+            }
+            Dialog::Render(size, transparent) => {
+                ui.heading(i.tr("render-title"));
+                ui.horizontal(|ui| {
+                    ui.label(i.tr("render-size"));
+                    for s in [512, 1024, 2048] {
+                        ui.selectable_value(size, s, format!("{s}×{s}"));
+                    }
+                });
+                ui.checkbox(transparent, i.tr("render-transparent"));
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("render-export")),
+                        (Choice::Cancel, i.tr("cancel")),
+                    ],
+                )
+            }
+            Dialog::Recover(files) => {
+                ui.label(i.tr_args("recover-question", &[("count", files.len().into())]));
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("recover-yes")),
+                        (Choice::Alternate, i.tr("recover-no")),
+                    ],
+                )
+            }
             Dialog::DeleteSkin(_, name) => {
                 ui.label(library_view::delete_question(i, name));
                 buttons(
@@ -2265,6 +2711,32 @@ impl App {
             }
             (Dialog::EditCard(path, draft), Choice::Accept) => self.save_card_draft(&path, &draft),
             (Dialog::DeleteSkin(path, _), Choice::Accept) => self.delete_skin(&path),
+            (Dialog::Recover(files), Choice::Accept) => {
+                self.recover(&files);
+                if let Some(d) = recovery_dir() {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+            }
+            (Dialog::Recover(_), Choice::Alternate) => {
+                if let Some(d) = recovery_dir() {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+            }
+            (Dialog::ReplaceColor(from, to, part_only), Choice::Accept) => {
+                let part = self.selected.filter(|_| part_only);
+                self.editor.replace_color(
+                    Rgba(from.to_srgba_unmultiplied()),
+                    Rgba(to.to_srgba_unmultiplied()),
+                    part,
+                );
+            }
+            (Dialog::Render(size, transparent), Choice::Accept) => {
+                let bg = self.settings.background_3d.map_or_else(
+                    || ctx.global_style().visuals.panel_fill,
+                    |[r, g, b]| Color32::from_rgb(r, g, b),
+                );
+                self.capture(size, (!transparent).then_some(bg));
+            }
             (Dialog::ImportImage(st), Choice::Accept) => {
                 let model = self.editor.skin().model;
                 let canvas = fit(&st.src, st.crop, model, st.fit);
@@ -2276,6 +2748,13 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Cierre normal: lo que haya en la carpeta de recuperación ya no hace falta.
+    fn on_exit(&mut self) {
+        if let Some(d) = recovery_dir() {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // El idioma se cambia en caliente desde Ajustes.
@@ -2283,10 +2762,17 @@ impl eframe::App for App {
         if lang != self.i18n.lang() {
             self.i18n = I18n::new(lang);
         }
+        style::set_motion(&ctx, self.settings.reduce_motion);
+        let scale = self.settings.ui_scale.clamp(0.75, 2.0);
+        if scale != self.applied_scale {
+            ctx.set_zoom_factor(scale);
+            self.applied_scale = scale;
+        }
         self.handle_close(&ctx);
         self.handle_drops(&ctx);
         self.shortcuts(&ctx);
         self.autosave(&ctx);
+        self.write_recovery(&ctx);
         egui::Panel::top("menu").show(ui, |ui| self.menu(ui));
         egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui, &ctx));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
@@ -2340,6 +2826,8 @@ fn swatch(ui: &mut egui::Ui, c: [u8; 4]) -> egui::Response {
 }
 
 const PALETTE_IMPORT_MAX: usize = 32;
+/// Cuánto se puede desplazar la cámara libre, en píxeles de la skin.
+const PAN_MAX: f32 = 40.0;
 
 fn shortcut_of(key: Key, m: egui::Modifiers) -> Shortcut {
     Shortcut {
@@ -2401,7 +2889,45 @@ fn action_name(i: &I18n, a: Action) -> String {
         Action::CloseTab => i.tr("tab-close"),
         Action::NextTab => i.tr("tab-next"),
         Action::PrevTab => i.tr("tab-prev"),
+        Action::Lighten => i.tr("tool-lighten"),
+        Action::Darken => i.tr("tool-darken"),
+        Action::ToggleOverlay => i.tr("action-toggle-overlay"),
+        Action::ViewFront => i.tr("view-front"),
+        Action::ViewBack => i.tr("view-back"),
+        Action::ViewSide => i.tr("view-side"),
+        Action::FocusPart => i.tr("view-focus-part"),
     }
+}
+
+fn action_icon(a: Action) -> Option<Icon> {
+    Some(match a {
+        Action::New => Icon::New,
+        Action::Open => Icon::Open,
+        Action::Save | Action::SaveAs => Icon::Save,
+        Action::Export | Action::QuickExport => Icon::Export,
+        Action::Undo => Icon::Undo,
+        Action::Redo => Icon::Redo,
+        Action::CopySelection => Icon::Select,
+        Action::EraseSelection | Action::Eraser => Icon::Eraser,
+        Action::Deselect | Action::CloseTab => Icon::Close,
+        Action::Pencil => Icon::Pencil,
+        Action::Fill => Icon::Fill,
+        Action::Picker => Icon::Picker,
+        Action::Gradient => Icon::Gradient,
+        Action::Stamp => Icon::Stamp,
+        Action::Select => Icon::Select,
+        Action::ToggleMirror => Icon::Mirror,
+        Action::SwapColors => Icon::Swap,
+        Action::ToggleView => Icon::Cube,
+        Action::Lighten => Icon::Sun,
+        Action::Darken => Icon::Moon,
+        Action::ToggleOverlay => Icon::Library,
+        Action::ViewFront | Action::ViewBack | Action::ViewSide => Icon::Cube,
+        Action::FocusPart => Icon::Search,
+        Action::CopyParts | Action::PasteParts | Action::NextTab | Action::PrevTab => {
+            return None;
+        }
+    })
 }
 
 fn part_name(i: &I18n, p: Part) -> String {
@@ -2451,6 +2977,10 @@ fn skin_image(skin: &Skin, visible: impl Fn(Part, Layer) -> bool) -> ColorImage 
         }
     }
     ColorImage::from_rgba_unmultiplied([64, 64], px.as_raw())
+}
+
+fn recovery_dir() -> Option<PathBuf> {
+    crate::settings::log::data_dir().map(|d| d.join("recuperacion"))
 }
 
 fn png_dialog() -> rfd::FileDialog {

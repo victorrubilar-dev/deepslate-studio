@@ -21,6 +21,10 @@ pub enum Tool {
     Gradient,
     Stamp,
     Select,
+    /// Aclara cada píxel por el que pasa, una vez por trazo.
+    Lighten,
+    /// Oscurece cada píxel por el que pasa, una vez por trazo.
+    Darken,
 }
 
 /// Pintar en espejo: nada, todo el personaje, o solo cuando se pinta en esa parte o en su pareja.
@@ -49,6 +53,10 @@ pub struct Editor {
     /// Si hay selección, solo se puede pintar dentro de ella.
     selection: Option<Rect>,
     mirror: Mirror,
+    /// Lado del pincel en píxeles (1 o 2).
+    brush: u32,
+    /// Píxeles ya aclarados u oscurecidos en el trazo en curso.
+    shaded: Vec<bool>,
 }
 
 impl Editor {
@@ -65,6 +73,8 @@ impl Editor {
             pose: Pose::default(),
             selection: None,
             mirror: Mirror::Off,
+            brush: 1,
+            shaded: vec![false; 64 * 64],
         }
     }
 
@@ -94,6 +104,12 @@ impl Editor {
 
     pub fn mark_saved(&mut self) {
         self.saved_revision = self.revision;
+    }
+
+    /// Queda con cambios sin guardar aunque no tenga historial (p. ej. una skin recuperada).
+    pub fn mark_unsaved(&mut self) {
+        // `revision` solo sube de a uno, así que nunca llega a este valor.
+        self.saved_revision = u64::MAX;
     }
 
     pub fn set_limit(&mut self, limit: usize) {
@@ -150,18 +166,64 @@ impl Editor {
         !self.redo.is_empty()
     }
 
+    pub fn set_brush(&mut self, size: u32) {
+        self.brush = size.clamp(1, 2);
+    }
+
     pub fn begin_stroke(&mut self) {
         self.stroke = Some(self.skin.clone());
+        self.shaded.fill(false);
+    }
+
+    /// Píxeles que cubre el pincel en (x, y), sin salir de la cara de ese punto: un pincel
+    /// grande en el borde de una cara no mancha la vecina en la textura.
+    fn dab(&self, x: u32, y: u32) -> Vec<(u32, u32)> {
+        let model = self.skin.model;
+        let face = face_at(model, x, y);
+        let mut out = Vec::new();
+        for dy in 0..self.brush {
+            for dx in 0..self.brush {
+                let (px, py) = (x + dx, y + dy);
+                if px < 64 && py < 64 && face_at(model, px, py) == face {
+                    out.push((px, py));
+                }
+            }
+        }
+        out
+    }
+
+    /// Píxeles de una línea con el pincel actual, y su espejo si corresponde.
+    fn brush_line(&self, from: (u32, u32), to: (u32, u32)) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for (x, y) in line(from, to) {
+            for (px, py) in self.dab(x, y) {
+                out.push((px, py));
+                out.extend(self.mirrored(px, py));
+            }
+        }
+        out
     }
 
     /// Pinta una línea de píxeles dentro del trazo en curso (lápiz o borrador).
     pub fn paint_line(&mut self, from: (u32, u32), to: (u32, u32), color: Rgba<u8>) {
         debug_assert!(self.stroke.is_some(), "paint_line fuera de un trazo");
-        for (x, y) in line(from, to) {
+        for (x, y) in self.brush_line(from, to) {
             self.put(x, y, color);
-            if let Some((mx, my)) = self.mirrored(x, y) {
-                self.put(mx, my, color);
+        }
+    }
+
+    /// Aclara u oscurece una línea dentro del trazo en curso. Cada píxel cambia una sola
+    /// vez por trazo, aunque se pase varias veces; lo transparente no cambia.
+    pub fn shade_line(&mut self, from: (u32, u32), to: (u32, u32), lighter: bool) {
+        debug_assert!(self.stroke.is_some(), "shade_line fuera de un trazo");
+        for (x, y) in self.brush_line(from, to) {
+            let k = (y * 64 + x) as usize;
+            let c = *self.skin.pixels.get_pixel(x, y);
+            if self.shaded[k] || c[3] == 0 || !self.editable(x, y) {
+                continue;
             }
+            self.shaded[k] = true;
+            self.put(x, y, shade(c, lighter));
         }
     }
 
@@ -313,6 +375,45 @@ impl Editor {
         });
     }
 
+    /// Cambia `from` por `to` en toda la skin, o solo en `part` (ambas capas).
+    pub fn replace_color(&mut self, from: Rgba<u8>, to: Rgba<u8>, part: Option<Part>) {
+        let model = self.skin.model;
+        self.step(|e| {
+            for (x, y) in (0..64).flat_map(|y| (0..64).map(move |x| (x, y))) {
+                let in_part =
+                    part.is_none_or(|p| matches!(face_at(model, x, y), Some((q, _, _)) if q == p));
+                if in_part && *e.skin.pixels.get_pixel(x, y) == from {
+                    e.put(x, y, to);
+                }
+            }
+        });
+    }
+
+    /// Varía al azar el brillo de cada píxel pintado, hasta `amount` hacia arriba o abajo,
+    /// para que un área de un solo color se vea con textura. Respeta la selección y lo
+    /// oculto; con `part`, solo esa parte. `seed` hace que el resultado sea repetible.
+    pub fn vary(&mut self, part: Option<Part>, amount: u8, seed: u64) {
+        let model = self.skin.model;
+        let mut state = seed | 1;
+        self.step(|e| {
+            for (x, y) in (0..64).flat_map(|y| (0..64).map(move |x| (x, y))) {
+                // xorshift: suficiente para ruido visual.
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let in_part =
+                    part.is_none_or(|p| matches!(face_at(model, x, y), Some((q, _, _)) if q == p));
+                let c = *e.skin.pixels.get_pixel(x, y);
+                if !in_part || c[3] == 0 {
+                    continue;
+                }
+                let d = (state % (2 * amount as u64 + 1)) as i32 - amount as i32;
+                let v = |i: usize| (c[i] as i32 + d).clamp(0, 255) as u8;
+                e.put(x, y, Rgba([v(0), v(1), v(2), c[3]]));
+            }
+        });
+    }
+
     pub fn pick(&self, x: u32, y: u32) -> Rgba<u8> {
         *self.skin.pixels.get_pixel(x, y)
     }
@@ -351,6 +452,20 @@ impl Editor {
 }
 
 pub const ERASE: Rgba<u8> = TRANSPARENT;
+
+/// Un paso más claro (hacia el blanco) o más oscuro (hacia el negro), sin tocar el alfa.
+fn shade(c: Rgba<u8>, lighter: bool) -> Rgba<u8> {
+    let f = |v: u8| {
+        let v = v as f32;
+        let out = if lighter {
+            v + (255.0 - v) * 0.15
+        } else {
+            v * 0.85
+        };
+        out.round() as u8
+    };
+    Rgba([f(c[0]), f(c[1]), f(c[2]), c[3]])
+}
 
 /// Píxeles de una línea entre dos puntos (Bresenham), para que un arrastre rápido no deje huecos.
 fn line((x0, y0): (u32, u32), (x1, y1): (u32, u32)) -> Vec<(u32, u32)> {
@@ -553,5 +668,91 @@ mod tests {
         e.undo();
         assert_eq!(*e.skin(), skin);
         assert!(!e.can_undo());
+    }
+
+    #[test]
+    fn brush_2_stays_in_face() {
+        let mut e = editor();
+        e.set_brush(2);
+        // (15, 8) es la última columna del frente de la cabeza: el pincel no pasa a la cara vecina.
+        e.begin_stroke();
+        e.paint_line((15, 8), (15, 8), RED);
+        e.end_stroke();
+        assert_eq!(e.pick(15, 8), RED);
+        assert_eq!(e.pick(15, 9), RED);
+        assert_eq!(e.pick(16, 8), TRANSPARENT);
+        e.begin_stroke();
+        e.paint_line((9, 9), (9, 9), RED);
+        e.end_stroke();
+        assert!(
+            [(9, 9), (10, 9), (9, 10), (10, 10)]
+                .iter()
+                .all(|&(x, y)| e.pick(x, y) == RED)
+        );
+    }
+
+    #[test]
+    fn shade_once_per_stroke_and_skips_transparent() {
+        let mut e = editor();
+        let grey = Rgba([100, 100, 100, 255]);
+        e.fill(9, 9, grey);
+        e.begin_stroke();
+        e.shade_line((9, 9), (12, 9), false);
+        e.shade_line((12, 9), (9, 9), false); // volver por encima no oscurece dos veces
+        e.shade_line((0, 0), (2, 0), false); // zona sin uso y transparente
+        e.end_stroke();
+        assert_eq!(e.pick(9, 9), Rgba([85, 85, 85, 255]));
+        assert_eq!(e.pick(13, 9), grey);
+        assert_eq!(e.pick(0, 0), TRANSPARENT);
+        e.begin_stroke();
+        e.shade_line((9, 9), (9, 9), true);
+        e.end_stroke();
+        assert_eq!(e.pick(9, 9), Rgba([111, 111, 111, 255]));
+        assert_eq!(e.undo.len(), 3);
+    }
+
+    #[test]
+    fn replace_color_in_part_only() {
+        let mut e = editor();
+        e.fill(9, 9, RED); // frente de la cabeza
+        e.fill(21, 21, RED); // frente del torso
+        let blue = Rgba([0, 0, 255, 255]);
+        e.replace_color(RED, blue, Some(Part::Head));
+        assert_eq!(e.pick(9, 9), blue);
+        assert_eq!(e.pick(21, 21), RED);
+        e.replace_color(RED, blue, None);
+        assert_eq!(e.pick(21, 21), blue);
+        e.undo();
+        assert_eq!(e.pick(21, 21), RED);
+    }
+
+    #[test]
+    fn vary_keeps_alpha_and_range_and_is_one_step() {
+        let mut e = editor();
+        let grey = Rgba([100, 100, 100, 255]);
+        e.fill(9, 9, grey);
+        e.vary(Some(Part::Head), 8, 42);
+        let front = rect(Part::Head, Layer::Base, Face::Front, Model::Steve);
+        let px: Vec<_> = front.pixels().map(|(x, y)| e.pick(x, y)).collect();
+        assert!(
+            px.iter()
+                .all(|c| c[3] == 255 && (92..=108).contains(&c[0]) && c[0] == c[1])
+        );
+        assert!(px.iter().any(|c| *c != grey), "debería cambiar algo");
+        assert_eq!(e.pick(0, 0), TRANSPARENT);
+        assert_eq!(e.undo.len(), 2);
+    }
+
+    #[test]
+    fn mark_unsaved_stays_dirty_until_saved() {
+        let mut e = editor();
+        e.mark_unsaved();
+        assert!(e.is_dirty());
+        e.begin_stroke();
+        e.paint_line((9, 9), (9, 9), RED);
+        e.end_stroke();
+        assert!(e.is_dirty());
+        e.mark_saved();
+        assert!(!e.is_dirty());
     }
 }

@@ -67,15 +67,15 @@ pub fn preset(i: u8) -> RgbaImage {
     let mut img = RgbaImage::new(W, H);
     let mut r = Lcg(0x5eed + i as u32);
     match i {
-        // Pizarra: capas de piedra con vetas menta.
+        // Pizarra: capas de grafito con vetas plateadas.
         0 => {
             bands(
                 &mut img,
-                &[0x2b2f38, 0x31353f, 0x2b2f38, 0x363b46, 0x2e323c],
+                &[0x2a292f, 0x302f36, 0x2a292f, 0x35343c, 0x2d2c33],
             );
-            dots(&mut img, &mut r, 70, H, 0x23262e);
-            dots(&mut img, &mut r, 40, H, 0x3f4552);
-            dots(&mut img, &mut r, 6, H, 0x40d6b4);
+            dots(&mut img, &mut r, 70, H, 0x222126);
+            dots(&mut img, &mut r, 40, H, 0x403f48);
+            dots(&mut img, &mut r, 6, H, 0xb8c4d6);
         }
         // Cielo de día con nubes.
         1 => {
@@ -115,7 +115,7 @@ pub fn preset(i: u8) -> RgbaImage {
             rect(&mut img, 13, 22, 6, 2, 0xffe08a);
             hills(&mut img, &mut r, 31, 0x3a1f3f, 0x24132a);
         }
-        // Cueva: roca oscura con cristales menta.
+        // Cueva: roca oscura con cristales plateados.
         _ => {
             bands(
                 &mut img,
@@ -124,9 +124,9 @@ pub fn preset(i: u8) -> RgbaImage {
             dots(&mut img, &mut r, 60, H, 0x2a2e38);
             for _ in 0..5 {
                 let (x, y) = (r.below(W - 2), 6 + r.below(H - 10));
-                rect(&mut img, x, y, 1, 3, 0x40d6b4);
-                rect(&mut img, x + 1, y + 1, 1, 2, 0x7cecd0);
-                img.put_pixel(x, y + 3, rgb(0x1f8a72));
+                rect(&mut img, x, y, 1, 3, 0xb8c4d6);
+                rect(&mut img, x + 1, y + 1, 1, 2, 0xe2e8f2);
+                img.put_pixel(x, y + 3, rgb(0x5d6779));
             }
         }
     }

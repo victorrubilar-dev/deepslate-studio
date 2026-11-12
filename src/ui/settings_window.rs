@@ -204,6 +204,16 @@ fn general(ui: &mut egui::Ui, i: &I18n, s: &mut Settings) {
         row(ui, i.tr("settings-open-last"), |ui| {
             ui.checkbox(&mut s.open_last, "");
         });
+        row(ui, i.tr("settings-reduce-motion"), |ui| {
+            ui.checkbox(&mut s.reduce_motion, "");
+        });
+        row(ui, i.tr("settings-ui-scale"), |ui| {
+            let options: Vec<(f32, String)> = [0.9, 1.0, 1.1, 1.25, 1.5]
+                .into_iter()
+                .map(|k| (k, format!("{:.0} %", k * 100.0)))
+                .collect();
+            combo(ui, "ui-scale", &mut s.ui_scale, &options);
+        });
     });
 }
 
