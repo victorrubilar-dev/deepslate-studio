@@ -2,15 +2,25 @@
 //! Cualquier visor lo abre como imagen, y un PNG sin ese bloque se importa como skin nueva.
 
 use crate::core::{LoadError, Model, Skin};
+use crate::render3d::Pose;
 use serde::{Deserialize, Serialize};
 
 const KEYWORD: &str = "deepslate-studio";
-pub const VERSION: u32 = 1;
+/// v1: modelo. v2: agrega la pose.
+pub const VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct Meta {
     version: u32,
     model: Model,
+    #[serde(default)]
+    pose: Pose,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Project {
+    pub skin: Skin,
+    pub pose: Pose,
 }
 
 #[derive(Debug, PartialEq)]
@@ -21,10 +31,11 @@ pub enum ProjectError {
     Corrupt,
 }
 
-pub fn save(skin: &Skin) -> Vec<u8> {
+pub fn save(skin: &Skin, pose: &Pose) -> Vec<u8> {
     let meta = Meta {
         version: VERSION,
         model: skin.model,
+        pose: *pose,
     };
     let mut out = Vec::new();
     let mut enc = png::Encoder::new(&mut out, skin.pixels.width(), skin.pixels.height());
@@ -42,8 +53,9 @@ pub fn save(skin: &Skin) -> Vec<u8> {
     out
 }
 
-pub fn load(bytes: &[u8]) -> Result<Skin, ProjectError> {
+pub fn load(bytes: &[u8]) -> Result<Project, ProjectError> {
     let mut skin = Skin::from_png(bytes).map_err(ProjectError::Skin)?;
+    let mut pose = Pose::default();
     if let Some(text) = read_meta(bytes) {
         #[derive(Deserialize)]
         struct VersionOnly {
@@ -55,8 +67,9 @@ pub fn load(bytes: &[u8]) -> Result<Skin, ProjectError> {
         }
         let meta: Meta = ron::from_str(&text).map_err(|_| ProjectError::Corrupt)?;
         skin.model = meta.model;
+        pose = meta.pose;
     }
-    Ok(skin)
+    Ok(Project { skin, pose })
 }
 
 /// Indica si el PNG trae datos de proyecto (y no es una skin suelta).
@@ -80,6 +93,7 @@ fn read_meta(bytes: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render3d::Preset;
     use image::Rgba;
 
     fn sample() -> Skin {
@@ -92,12 +106,20 @@ mod tests {
     #[test]
     fn roundtrip_keeps_model_and_pixels() {
         // Sin metadatos, esta skin vacía se detectaría como Steve: el modelo viene del bloque.
-        assert_eq!(load(&save(&sample())), Ok(sample()));
+        let pose = Preset::Waving.pose();
+        let p = load(&save(&sample(), &pose)).unwrap();
+        assert_eq!(
+            p,
+            Project {
+                skin: sample(),
+                pose
+            }
+        );
     }
 
     #[test]
     fn plain_png_imports() {
-        let s = load(&sample().to_png()).unwrap();
+        let s = load(&sample().to_png()).unwrap().skin;
         assert_eq!(s.pixels, sample().pixels);
         assert_eq!(s.model, Model::Steve);
     }
@@ -128,9 +150,17 @@ mod tests {
     /// Compatibilidad: un proyecto v1 escrito a mano debe seguir abriéndose igual.
     #[test]
     fn reads_v1() {
-        assert_eq!(
-            load(&with_meta("(version: 1, model: Alex)")).unwrap().model,
-            Model::Alex
-        );
+        let p = load(&with_meta("(version: 1, model: Alex)")).unwrap();
+        assert_eq!((p.skin.model, p.pose), (Model::Alex, Pose::default()));
+    }
+
+    /// Compatibilidad: v2 con pose parcial (articulaciones faltantes quedan en cero).
+    #[test]
+    fn reads_v2() {
+        let p = load(&with_meta(
+            "(version: 2, model: Steve, pose: (right_arm: (-180.0, 0.0, 0.0)))",
+        ))
+        .unwrap();
+        assert_eq!(p.pose, Preset::ArmUp.pose());
     }
 }

@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum View {
+    Flat,
+    ThreeD,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Theme {
     System,
     Dark,
@@ -17,6 +23,8 @@ pub struct Settings {
     pub pixel_size: f32,
     pub show_grid: bool,
     pub undo_levels: usize,
+    /// Última vista usada (2D o 3D).
+    pub view: View,
 }
 
 impl Default for Settings {
@@ -26,6 +34,7 @@ impl Default for Settings {
             pixel_size: 10.0,
             show_grid: true,
             undo_levels: 100,
+            view: View::Flat,
         }
     }
 }

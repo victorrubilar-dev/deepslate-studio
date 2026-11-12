@@ -2,6 +2,7 @@
 //! Cada paso de deshacer guarda la skin entera: son 16 KB y evita errores de diferencias.
 
 use crate::core::{Layer, Part, Skin, TRANSPARENT, face_at, rect};
+use crate::render3d::Pose;
 use image::Rgba;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +23,8 @@ pub struct Editor {
     saved_revision: u64,
     /// Visibilidad por parte y capa; lo oculto tampoco se puede pintar.
     visible: [[bool; 2]; 6],
+    /// Se guarda con el proyecto; cambiarla deja cambios sin guardar, pero no entra en deshacer.
+    pose: Pose,
 }
 
 impl Editor {
@@ -35,6 +38,7 @@ impl Editor {
             revision: 0,
             saved_revision: 0,
             visible: [[true; 2]; 6],
+            pose: Pose::default(),
         }
     }
 
@@ -49,6 +53,17 @@ impl Editor {
 
     pub fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision
+    }
+
+    pub fn pose(&self) -> &Pose {
+        &self.pose
+    }
+
+    pub fn set_pose(&mut self, pose: Pose) {
+        if pose != self.pose {
+            self.pose = pose;
+            self.revision += 1;
+        }
     }
 
     pub fn mark_saved(&mut self) {

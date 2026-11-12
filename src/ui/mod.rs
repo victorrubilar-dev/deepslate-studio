@@ -3,8 +3,9 @@
 use crate::core::{FACES, LAYERS, Layer, LoadError, Model, PARTS, Part, Skin, convert_model, rect};
 use crate::editor::{ERASE, Editor, Tool};
 use crate::i18n::I18n;
-use crate::project::{self, ProjectError};
-use crate::settings::{self, Settings, Theme};
+use crate::project::{self, Project, ProjectError};
+use crate::render3d::{Camera, PRESETS, Preset, Renderer3d, Scene, pick};
+use crate::settings::{self, Settings, Theme, View};
 use eframe::egui::{
     self, Color32, ColorImage, Key, KeyboardShortcut, Modifiers, Pos2, Rect, Sense, Stroke,
     StrokeKind, TextureHandle, TextureOptions, Vec2, color_picker, ecolor::Hsva,
@@ -51,6 +52,10 @@ pub struct App {
     dialog: Option<Dialog>,
     status: String,
     closing: bool,
+    renderer: Option<Renderer3d>,
+    uploaded_rev: Option<u64>,
+    camera: Camera,
+    selected: Option<Part>,
 }
 
 impl App {
@@ -79,13 +84,21 @@ impl App {
             dialog: None,
             status: String::new(),
             closing: false,
+            // Solo es None si eframe no arrancó con wgpu; entonces la vista 3D muestra un aviso.
+            renderer: cc.wgpu_render_state.as_ref().map(Renderer3d::new),
+            uploaded_rev: None,
+            camera: Camera::default(),
+            selected: None,
         }
     }
 
-    fn set_skin(&mut self, skin: Skin, path: Option<PathBuf>) {
-        self.editor = Editor::new(skin, self.settings.undo_levels);
+    fn set_project(&mut self, project: Project, path: Option<PathBuf>) {
+        self.editor = Editor::new(project.skin, self.settings.undo_levels);
+        self.editor.set_pose(project.pose);
+        self.editor.mark_saved();
         self.path = path;
         self.texture_rev = None;
+        self.uploaded_rev = None;
     }
 
     // ---- Archivo ----
@@ -100,7 +113,13 @@ impl App {
 
     fn run(&mut self, ctx: &egui::Context, after: After) {
         match after {
-            After::New => self.set_skin(Skin::blank(Model::Steve), None),
+            After::New => self.set_project(
+                Project {
+                    skin: Skin::blank(Model::Steve),
+                    pose: Default::default(),
+                },
+                None,
+            ),
             After::Open => self.open(),
             After::Close => {
                 self.closing = true;
@@ -123,7 +142,7 @@ impl App {
             }
         };
         match project::load(&bytes) {
-            Ok(skin) => {
+            Ok(project) => {
                 // Un PNG suelto se importa sin ruta, para que "Guardar" no lo sobrescriba sin preguntar.
                 let is_project = project::is_project(&bytes);
                 let key = if is_project {
@@ -132,7 +151,7 @@ impl App {
                     "status-imported"
                 };
                 self.status = self.i18n.tr_args(key, &[("file", file_name(&path).into())]);
-                self.set_skin(skin, is_project.then_some(path));
+                self.set_project(project, is_project.then_some(path));
             }
             Err(e) => self.error(self.load_error(e)),
         }
@@ -159,7 +178,7 @@ impl App {
                 None => return false,
             },
         };
-        match std::fs::write(&path, project::save(self.editor.skin())) {
+        match std::fs::write(&path, project::save(self.editor.skin(), self.editor.pose())) {
             Ok(()) => {
                 self.editor.mark_saved();
                 self.status = self
@@ -355,7 +374,11 @@ impl App {
             }
             ui.end_row();
             for (part, name) in names {
-                ui.label(&name);
+                if self.selected == Some(part) {
+                    ui.label(egui::RichText::new(&name).strong().color(ACCENT));
+                } else {
+                    ui.label(&name);
+                }
                 for (layer, layer_name) in LAYERS.into_iter().zip(&layer_names) {
                     let mut on = self.editor.is_visible(part, layer);
                     let resp = ui
@@ -384,6 +407,141 @@ impl App {
             None => self.texture = Some(ctx.load_texture("skin", img, TextureOptions::NEAREST)),
         }
         self.texture_rev = Some(rev);
+    }
+
+    fn central(&mut self, ui: &mut egui::Ui) {
+        let before = self.settings.view;
+        ui.horizontal(|ui| {
+            let i = &self.i18n;
+            ui.selectable_value(&mut self.settings.view, View::Flat, i.tr("view-2d"));
+            ui.selectable_value(&mut self.settings.view, View::ThreeD, i.tr("view-3d"));
+            if self.settings.view == View::ThreeD {
+                ui.separator();
+                ui.label(i.tr("pose"));
+                let current = Preset::matching(self.editor.pose())
+                    .map_or_else(|| i.tr("pose-custom"), |p| pose_name(i, p));
+                let mut chosen = None;
+                egui::ComboBox::from_id_salt("pose")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for p in PRESETS {
+                            if ui.button(pose_name(i, p)).clicked() {
+                                chosen = Some(p);
+                            }
+                        }
+                    });
+                if let Some(p) = chosen {
+                    self.editor.set_pose(p.pose());
+                }
+                if ui.button(i.tr("view-reset")).clicked() {
+                    self.camera = Camera::default();
+                }
+                if ui.button(i.tr("capture")).clicked() {
+                    self.capture();
+                }
+            }
+        });
+        if self.settings.view != before {
+            self.settings_changed = true;
+        }
+        ui.separator();
+        match self.settings.view {
+            View::Flat => self.canvas(ui),
+            View::ThreeD => self.view3d(ui),
+        }
+    }
+
+    fn view3d(&mut self, ui: &mut egui::Ui) {
+        let Some(renderer) = &mut self.renderer else {
+            ui.label(self.i18n.tr("view3d-unavailable"));
+            return;
+        };
+        let (area, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        if resp.dragged() {
+            let d = resp.drag_delta();
+            self.camera.yaw += d.x * 0.5;
+            self.camera.pitch = (self.camera.pitch + d.y * 0.5).clamp(-89.0, 89.0);
+        }
+        if resp.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            self.camera.distance = (self.camera.distance - scroll * 0.1).clamp(30.0, 160.0);
+        }
+        let editor = &self.editor;
+        let visible = |p, l| editor.is_visible(p, l);
+        let aspect = area.width() / area.height().max(1.0);
+        if resp.clicked()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            let nx = (pos.x - area.min.x) / area.width() * 2.0 - 1.0;
+            let ny = 1.0 - (pos.y - area.min.y) / area.height() * 2.0;
+            let model = editor.skin().model;
+            self.selected = pick(
+                model,
+                editor.pose(),
+                &self.camera,
+                &visible,
+                aspect,
+                (nx, ny),
+            );
+        }
+        if self.uploaded_rev != Some(editor.revision()) {
+            renderer.upload_skin(&editor.skin().pixels);
+            self.uploaded_rev = Some(editor.revision());
+        }
+        let scene = Scene {
+            model: editor.skin().model,
+            pose: editor.pose(),
+            camera: &self.camera,
+            selected: self.selected,
+            visible: &visible,
+        };
+        let ppp = ui.ctx().pixels_per_point();
+        let size = [area.width(), area.height()].map(|v| (v * ppp).round() as u32);
+        let tex = renderer.render(size, &scene);
+        ui.painter_at(area).image(
+            tex,
+            area,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        resp.on_hover_text(self.i18n.tr("view3d-hint"));
+    }
+
+    fn capture(&mut self) {
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        let Some(path) = png_dialog().set_file_name("captura.png").save_file() else {
+            return;
+        };
+        let path = with_png_ext(path);
+        let editor = &self.editor;
+        if self.uploaded_rev != Some(editor.revision()) {
+            renderer.upload_skin(&editor.skin().pixels);
+            self.uploaded_rev = Some(editor.revision());
+        }
+        let visible = |p, l| editor.is_visible(p, l);
+        let scene = Scene {
+            model: editor.skin().model,
+            pose: editor.pose(),
+            camera: &self.camera,
+            selected: None,
+            visible: &visible,
+        };
+        let Some(img) = renderer.capture(1024, &scene) else {
+            return self.error(self.i18n.tr("error-capture"));
+        };
+        let result = img
+            .save_with_format(&path, image::ImageFormat::Png)
+            .map_err(|e| e.to_string());
+        match result {
+            Ok(()) => {
+                self.status = self
+                    .i18n
+                    .tr_args("status-captured", &[("file", file_name(&path).into())])
+            }
+            Err(e) => self.error(self.i18n.tr_args("error-io", &[("detail", e.into())])),
+        }
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
@@ -433,6 +591,17 @@ impl App {
             let outline = Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color);
             for r in &visible_faces {
                 painter.rect_stroke(*r, 0.0, outline, StrokeKind::Inside);
+            }
+            if let Some(part) = self.selected {
+                for layer in LAYERS
+                    .into_iter()
+                    .filter(|&l| self.editor.is_visible(part, l))
+                {
+                    for face in FACES {
+                        let r = to_screen(rect(part, layer, face, model));
+                        painter.rect_stroke(r, 0.0, Stroke::new(2.0, ACCENT), StrokeKind::Inside);
+                    }
+                }
             }
 
             let hover = resp
@@ -662,9 +831,25 @@ impl eframe::App for App {
         egui::Panel::left("tools")
             .default_size(260.0)
             .show(ui, |ui| self.side(ui));
-        egui::CentralPanel::default_margins().show(ui, |ui| self.canvas(ui));
+        egui::CentralPanel::default_margins().show(ui, |ui| self.central(ui));
         self.settings_window(&ctx);
         self.dialogs(&ctx);
+    }
+}
+
+/// Color de acento para la parte seleccionada; el mismo que usa el shader 3D.
+const ACCENT: Color32 = Color32::from_rgb(51, 191, 179);
+
+fn pose_name(i: &I18n, p: Preset) -> String {
+    match p {
+        Preset::Standing => i.tr("pose-standing"),
+        Preset::Walking => i.tr("pose-walking"),
+        Preset::Waving => i.tr("pose-waving"),
+        Preset::ArmUp => i.tr("pose-arm-up"),
+        Preset::Crouching => i.tr("pose-crouching"),
+        Preset::Running => i.tr("pose-running"),
+        Preset::Combat => i.tr("pose-combat"),
+        Preset::Neutral => i.tr("pose-neutral"),
     }
 }
 

@@ -70,3 +70,23 @@ theme-light = Claro
 settings-pixel-size = Tamaño de píxel
 settings-grid = Mostrar cuadrícula
 settings-undo = Niveles de deshacer
+
+view-2d = 2D
+view-3d = 3D
+view-reset = Restablecer vista
+view3d-unavailable = La vista 3D no está disponible en este equipo.
+view3d-hint = Arrastra para girar, usa la rueda para acercar y haz clic en una parte para seleccionarla.
+capture = Capturar imagen…
+status-captured = Captura guardada: { $file }
+error-capture = No se pudo obtener la imagen de la vista 3D.
+
+pose = Pose
+pose-custom = Personalizada
+pose-standing = De pie
+pose-walking = Caminando
+pose-waving = Saludando
+pose-arm-up = Brazo arriba
+pose-crouching = Agachado
+pose-running = Corriendo
+pose-combat = Combate
+pose-neutral = Neutra
