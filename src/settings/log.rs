@@ -41,6 +41,10 @@ pub fn data_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "deepslate-studio").map(|d| d.data_dir().to_path_buf())
 }
 
+pub fn cache_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "deepslate-studio").map(|d| d.cache_dir().to_path_buf())
+}
+
 pub fn path() -> Option<PathBuf> {
     data_dir().map(|d| d.join("registro.log"))
 }

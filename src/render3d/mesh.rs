@@ -36,6 +36,17 @@ impl Default for Camera {
     }
 }
 
+impl Camera {
+    /// Encuadre de las miniaturas de la biblioteca: el cuerpo entero, de tres cuartos.
+    pub fn thumbnail() -> Self {
+        Self {
+            yaw: -25.0,
+            pitch: 10.0,
+            distance: 66.0,
+        }
+    }
+}
+
 pub const FOV_DEG: f32 = 35.0;
 const CENTER: V3 = [0.0, 16.0, 0.0];
 

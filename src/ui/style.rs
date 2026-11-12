@@ -101,3 +101,8 @@ pub fn apply(ctx: &egui::Context) {
         w.active.bg_stroke = Stroke::new(1.0, ACCENT_DARK);
     });
 }
+
+/// Fuente pixel de los títulos, para usarla en otros textos destacados.
+pub fn pixel_font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(PIXEL.into()))
+}

@@ -1,5 +1,4 @@
-//! Ventana de Ajustes (todas las secciones salvo Biblioteca, que llega en el hito 3)
-//! y ventana del registro.
+//! Ventana de Ajustes y ventana del registro.
 
 use super::{App, Dialog, action_name, shortcut_label, shortcut_of, theme_pref};
 use crate::editor::Tool;
@@ -35,6 +34,7 @@ impl App {
         let before = self.settings.clone();
         let mut reset = false;
         let mut show_log = false;
+        let mut clear_cache = false;
         let i = &self.i18n;
         egui::Window::new(i.tr("settings-title"))
             .open(&mut open)
@@ -52,6 +52,9 @@ impl App {
                     shortcuts_editor(ui, i, s, &mut self.binding, &mut self.bind_msg);
                 });
                 egui::CollapsingHeader::new(i.tr("settings-3d")).show(ui, |ui| view_3d(ui, i, s));
+                egui::CollapsingHeader::new(i.tr("settings-library")).show(ui, |ui| {
+                    clear_cache = library(ui, i, s);
+                });
                 egui::CollapsingHeader::new(i.tr("settings-export"))
                     .show(ui, |ui| export(ui, i, s));
                 egui::CollapsingHeader::new(i.tr("settings-advanced")).show(ui, |ui| {
@@ -80,6 +83,21 @@ impl App {
         }
         if show_log {
             self.log_text = Some(read_log(&self.i18n));
+        }
+        if clear_cache {
+            match super::library_view::clear_thumb_cache() {
+                Ok(()) => {
+                    self.lib.clear_thumbs();
+                    self.status = self.i18n.tr("status-cache-cleared");
+                }
+                Err(e) => self.error(
+                    self.i18n
+                        .tr_args("error-io", &[("detail", e.to_string().into())]),
+                ),
+            }
+        }
+        if self.settings.library_dir != before.library_dir {
+            self.lib.stale = true;
         }
 
         if self.settings != before {
@@ -258,6 +276,33 @@ fn view_3d(ui: &mut egui::Ui, i: &I18n, s: &mut Settings) {
         });
     });
     ui.weak(i.tr("settings-capture-note"));
+}
+
+/// Devuelve `true` si se pidió limpiar la caché de miniaturas.
+fn library(ui: &mut egui::Ui, i: &I18n, s: &mut Settings) -> bool {
+    egui::Grid::new("library").num_columns(2).show(ui, |ui| {
+        row(ui, i.tr("settings-library-dir"), |ui| {
+            ui.horizontal(|ui| {
+                let shown = super::library_view::library_dir(s)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                ui.label(shown);
+                if ui.button(i.tr("settings-choose")).clicked()
+                    && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                {
+                    s.library_dir = Some(dir);
+                }
+                if s.library_dir.is_some() && ui.button(i.tr("settings-library-default")).clicked()
+                {
+                    s.library_dir = None;
+                }
+            });
+        });
+        row(ui, i.tr("settings-card-size"), |ui| {
+            ui.add(egui::Slider::new(&mut s.card_size, settings::CARD_SIZE));
+        });
+    });
+    ui.button(i.tr("settings-clear-cache")).clicked()
 }
 
 fn export(ui: &mut egui::Ui, i: &I18n, s: &mut Settings) {

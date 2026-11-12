@@ -12,6 +12,7 @@ pub enum View {
     Flat,
     ThreeD,
     Preview,
+    Library,
 }
 
 /// Vista al abrir la app: la última usada o una fija.
@@ -190,6 +191,11 @@ pub struct Settings {
     /// Admite `{name}` y `{model}`.
     pub export_name: String,
     pub confirm_overwrite: bool,
+
+    /// `None`: la carpeta `skins` dentro de los datos de la app.
+    pub library_dir: Option<PathBuf>,
+    /// Ancho de las tarjetas, en puntos.
+    pub card_size: f32,
 }
 
 impl Default for Settings {
@@ -218,6 +224,8 @@ impl Default for Settings {
             export_dir: None,
             export_name: "{name}".into(),
             confirm_overwrite: true,
+            library_dir: None,
+            card_size: 170.0,
         }
     }
 }
@@ -227,6 +235,7 @@ pub const UNDO_LEVELS: std::ops::RangeInclusive<usize> = 1..=1000;
 pub const AUTOSAVE_MINUTES: std::ops::RangeInclusive<u32> = 1..=60;
 pub const LIGHTING: std::ops::RangeInclusive<f32> = 0.0..=1.0;
 pub const ROTATE_SPEED: std::ops::RangeInclusive<f32> = 0.2..=3.0;
+pub const CARD_SIZE: std::ops::RangeInclusive<f32> = 120.0..=280.0;
 /// Valor de `language` que sigue al idioma del sistema.
 pub const SYSTEM_LANGUAGE: &str = "system";
 
@@ -348,6 +357,7 @@ impl Settings {
             .autosave_minutes
             .clamp(*AUTOSAVE_MINUTES.start(), *AUTOSAVE_MINUTES.end());
         self.lighting = self.lighting.clamp(*LIGHTING.start(), *LIGHTING.end());
+        self.card_size = self.card_size.clamp(*CARD_SIZE.start(), *CARD_SIZE.end());
         self.rotate_speed = self
             .rotate_speed
             .clamp(*ROTATE_SPEED.start(), *ROTATE_SPEED.end());

@@ -6,8 +6,8 @@ use crate::render3d::Pose;
 use serde::{Deserialize, Serialize};
 
 const KEYWORD: &str = "deepslate-studio";
-/// v1: modelo. v2: agrega la pose.
-pub const VERSION: u32 = 2;
+/// v1: modelo. v2: agrega la pose. v3: agrega los datos de la tarjeta de biblioteca.
+pub const VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct Meta {
@@ -15,12 +15,41 @@ struct Meta {
     model: Model,
     #[serde(default)]
     pose: Pose,
+    #[serde(default)]
+    card: Card,
+}
+
+/// Datos de la tarjeta en la biblioteca. Viajan dentro del PNG, así que se conservan
+/// al mover o compartir el archivo.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Card {
+    /// Vacío: se muestra el nombre del archivo.
+    pub name: String,
+    pub background: Background,
+    pub favorite: bool,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Background {
+    /// Uno de los fondos dibujados por la app (índice).
+    Preset(u8),
+    /// Imagen del usuario, por nombre de archivo dentro de la carpeta de fondos.
+    Custom(String),
+}
+
+impl Default for Background {
+    fn default() -> Self {
+        Self::Preset(0)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Project {
     pub skin: Skin,
     pub pose: Pose,
+    pub card: Card,
 }
 
 #[derive(Debug, PartialEq)]
@@ -31,11 +60,12 @@ pub enum ProjectError {
     Corrupt,
 }
 
-pub fn save(skin: &Skin, pose: &Pose) -> Vec<u8> {
+pub fn save(skin: &Skin, pose: &Pose, card: &Card) -> Vec<u8> {
     let meta = Meta {
         version: VERSION,
         model: skin.model,
         pose: *pose,
+        card: card.clone(),
     };
     let mut out = Vec::new();
     let mut enc = png::Encoder::new(&mut out, skin.pixels.width(), skin.pixels.height());
@@ -56,6 +86,7 @@ pub fn save(skin: &Skin, pose: &Pose) -> Vec<u8> {
 pub fn load(bytes: &[u8]) -> Result<Project, ProjectError> {
     let mut skin = Skin::from_png(bytes).map_err(ProjectError::Skin)?;
     let mut pose = Pose::default();
+    let mut card = Card::default();
     if let Some(text) = read_meta(bytes) {
         #[derive(Deserialize)]
         struct VersionOnly {
@@ -68,8 +99,9 @@ pub fn load(bytes: &[u8]) -> Result<Project, ProjectError> {
         let meta: Meta = ron::from_str(&text).map_err(|_| ProjectError::Corrupt)?;
         skin.model = meta.model;
         pose = meta.pose;
+        card = meta.card;
     }
-    Ok(Project { skin, pose })
+    Ok(Project { skin, pose, card })
 }
 
 /// Indica si el PNG trae datos de proyecto (y no es una skin suelta).
@@ -107,12 +139,19 @@ mod tests {
     fn roundtrip_keeps_model_and_pixels() {
         // Sin metadatos, esta skin vacía se detectaría como Steve: el modelo viene del bloque.
         let pose = Preset::Waving.pose();
-        let p = load(&save(&sample(), &pose)).unwrap();
+        let card = Card {
+            name: "Mi skin".into(),
+            background: Background::Custom("cielo.png".into()),
+            favorite: true,
+            tags: vec!["azul".into(), "pirata".into()],
+        };
+        let p = load(&save(&sample(), &pose, &card)).unwrap();
         assert_eq!(
             p,
             Project {
                 skin: sample(),
-                pose
+                pose,
+                card
             }
         );
     }
@@ -162,5 +201,23 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(p.pose, Preset::ArmUp.pose());
+        assert_eq!(p.card, Card::default());
+    }
+
+    /// v3 con tarjeta parcial: lo que falta queda por defecto.
+    #[test]
+    fn reads_partial_card() {
+        let p = load(&with_meta(
+            "(version: 3, model: Steve, card: (favorite: true, background: Preset(4)))",
+        ))
+        .unwrap();
+        assert_eq!(
+            p.card,
+            Card {
+                favorite: true,
+                background: Background::Preset(4),
+                ..Card::default()
+            }
+        );
     }
 }

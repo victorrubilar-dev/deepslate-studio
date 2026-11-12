@@ -526,6 +526,7 @@ mod tests {
                     ..Camera::default()
                 },
             ),
+            ("miniatura", Preset::Running, Camera::thumbnail()),
         ];
         for (name, preset, camera) in shots {
             let pose = preset.pose();

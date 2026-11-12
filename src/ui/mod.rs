@@ -1,5 +1,6 @@
 //! Ventana principal: menús, panel de herramientas, lienzo 2D y diálogos.
 
+mod library_view;
 mod settings_window;
 mod style;
 
@@ -9,7 +10,7 @@ use crate::core::{
 use crate::editor::colors::{palette_from, parse_hex, to_hex};
 use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
-use crate::project::{self, Project, ProjectError};
+use crate::project::{self, Card, Project, ProjectError};
 use crate::render3d::{Camera, Hit, PRESETS, Preset, Renderer3d, Scene, pick, project};
 use crate::settings::{Action, NamedColor, Settings, Shortcut, StartView, Theme, View};
 use eframe::egui::{
@@ -35,6 +36,7 @@ struct Doc {
     path: Option<PathBuf>,
     camera: Camera,
     selected: Option<Part>,
+    card: Card,
 }
 
 impl Doc {
@@ -44,6 +46,7 @@ impl Doc {
             path: None,
             camera: Camera::default(),
             selected: None,
+            card: Card::default(),
         }
     }
 }
@@ -58,6 +61,9 @@ enum Dialog {
     Error(String),
     CopyParts(PartMask),
     PasteParts(PartMask),
+    EditCard(PathBuf, library_view::CardDraft),
+    /// Ruta y nombre de la tarjeta.
+    DeleteSkin(PathBuf, String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -101,8 +107,11 @@ pub struct App {
     show_settings: bool,
     editor: Editor,
     path: Option<PathBuf>,
+    /// Tarjeta de biblioteca de la pestaña activa; se guarda con el proyecto.
+    card: Card,
     tabs: Vec<Doc>,
     active: usize,
+    lib: library_view::LibraryState,
     tool: Tool,
     color: Hsva,
     texture: Option<TextureHandle>,
@@ -179,8 +188,10 @@ impl App {
             settings_changed: false,
             show_settings: false,
             path: None,
+            card: Card::default(),
             tabs: vec![Doc::empty()],
             active: 0,
+            lib: Default::default(),
             tool: Tool::Pencil,
             color: Hsva::from_srgba_unmultiplied([196, 92, 52, 255]),
             texture: None,
@@ -240,6 +251,7 @@ impl App {
         self.editor = Editor::new(project.skin, self.settings.undo_levels);
         self.editor.set_pose(project.pose);
         self.editor.mark_saved();
+        self.card = project.card;
         self.path = path;
         self.texture_rev = None;
         self.uploaded = None;
@@ -284,6 +296,7 @@ impl App {
         std::mem::swap(&mut self.path, &mut d.path);
         std::mem::swap(&mut self.camera, &mut d.camera);
         std::mem::swap(&mut self.selected, &mut d.selected);
+        std::mem::swap(&mut self.card, &mut d.card);
     }
 
     fn tab_dirty(&self, i: usize) -> bool {
@@ -336,6 +349,17 @@ impl App {
         self.tabs[self.active] = Doc::empty();
         self.texture_rev = None;
         self.uploaded = None;
+    }
+
+    /// Actualiza la tarjeta de la pestaña que tenga abierto `path`, si hay alguna.
+    fn set_open_card(&mut self, path: &Path, card: Card) {
+        if let Some(i) = (0..self.tabs.len()).find(|&i| self.tab_path(i) == Some(path)) {
+            if i == self.active {
+                self.card = card;
+            } else {
+                self.tabs[i].card = card;
+            }
+        }
     }
 
     /// Una pestaña sin archivo, sin cambios y sin historial: se puede reutilizar al abrir.
@@ -447,12 +471,20 @@ impl App {
     fn save(&mut self, save_as: bool) -> bool {
         let path = match (&self.path, save_as) {
             (Some(p), false) => p.clone(),
-            _ => match png_dialog().set_file_name("skin.png").save_file() {
+            _ => match library_view::library_dir(&self.settings)
+                .filter(|d| d.is_dir())
+                .map_or_else(png_dialog, |d| png_dialog().set_directory(d))
+                .set_file_name("skin.png")
+                .save_file()
+            {
                 Some(p) => with_png_ext(p),
                 None => return false,
             },
         };
-        match std::fs::write(&path, project::save(self.editor.skin(), self.editor.pose())) {
+        match std::fs::write(
+            &path,
+            project::save(self.editor.skin(), self.editor.pose(), &self.card),
+        ) {
             Ok(()) => {
                 self.editor.mark_saved();
                 self.status = self
@@ -553,7 +585,10 @@ impl App {
         if self.dialog.is_none() && !self.painting {
             for d in &mut self.tabs {
                 if let (true, Some(path)) = (d.editor.is_dirty(), &d.path) {
-                    match std::fs::write(path, project::save(d.editor.skin(), d.editor.pose())) {
+                    match std::fs::write(
+                        path,
+                        project::save(d.editor.skin(), d.editor.pose(), &d.card),
+                    ) {
                         Ok(()) => d.editor.mark_saved(),
                         Err(e) => log::error!("autoguardado de {}: {e}", path.display()),
                     }
@@ -663,7 +698,7 @@ impl App {
             Action::ToggleView => {
                 self.settings.view = match self.settings.view {
                     View::Flat => View::ThreeD,
-                    View::ThreeD | View::Preview => View::Flat,
+                    View::ThreeD | View::Preview | View::Library => View::Flat,
                 };
                 self.settings_changed = true;
             }
@@ -999,9 +1034,14 @@ impl App {
 
     fn central(&mut self, ui: &mut egui::Ui) {
         let before = self.settings.view;
-        let view3d = self.settings.view != View::Flat;
+        if before != View::Library {
+            self.lib.return_view = before;
+        }
+        let view3d = matches!(before, View::ThreeD | View::Preview);
         ui.horizontal_wrapped(|ui| {
             let i = &self.i18n;
+            ui.selectable_value(&mut self.settings.view, View::Library, i.tr("view-library"));
+            ui.separator();
             ui.selectable_value(&mut self.settings.view, View::Flat, i.tr("view-2d"));
             ui.selectable_value(&mut self.settings.view, View::ThreeD, i.tr("view-3d"));
             ui.selectable_value(&mut self.settings.view, View::Preview, i.tr("view-preview"));
@@ -1036,9 +1076,14 @@ impl App {
         }
         if self.settings.view != before {
             self.settings_changed = true;
+            // Al entrar a la biblioteca se vuelve a leer la carpeta: puede haber cambiado afuera.
+            if self.settings.view == View::Library {
+                self.lib.stale = true;
+            }
         }
         ui.separator();
         match self.settings.view {
+            View::Library => self.library(ui),
             View::Flat => self.canvas(ui),
             View::ThreeD => self.view3d(ui, false),
             View::Preview => self.view3d(ui, true),
@@ -1669,6 +1714,7 @@ impl App {
         };
         let id = egui::Id::unique("dialog");
         let mut dialog = dialog;
+        let mut picker_error = None;
         let resp = egui::Modal::new(id).show(ctx, |ui| match &mut dialog {
             Dialog::Discard(_) => {
                 ui.label(i.tr("discard-question"));
@@ -1775,7 +1821,50 @@ impl App {
                     ],
                 )
             }
+            Dialog::EditCard(_, draft) => {
+                ui.heading(i.tr("card-title"));
+                egui::Grid::new("card").num_columns(2).show(ui, |ui| {
+                    ui.label(i.tr("card-name"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.name)
+                            .hint_text(i.tr("card-name-hint")),
+                    );
+                    ui.end_row();
+                    ui.label(i.tr("card-tags"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.tags)
+                            .hint_text(i.tr("card-tags-hint")),
+                    );
+                    ui.end_row();
+                    ui.label("");
+                    ui.checkbox(&mut draft.favorite, i.tr("card-favorite-check"));
+                    ui.end_row();
+                });
+                ui.label(i.tr("card-background"));
+                picker_error = library_view::background_picker(&mut self.lib, i, ui, draft);
+                ui.add_space(6.0);
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("card-save")),
+                        (Choice::Cancel, i.tr("cancel")),
+                    ],
+                )
+            }
+            Dialog::DeleteSkin(_, name) => {
+                ui.label(library_view::delete_question(i, name));
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("card-delete-confirm")),
+                        (Choice::Cancel, i.tr("cancel")),
+                    ],
+                )
+            }
         });
+        if let Some(e) = picker_error {
+            self.error(e);
+        }
         let choice = match resp.inner {
             Some(c) => c,
             None if resp.should_close() => Choice::Cancel,
@@ -1809,6 +1898,8 @@ impl App {
                     self.editor.paste_parts(skin, &mask);
                 }
             }
+            (Dialog::EditCard(path, draft), Choice::Accept) => self.save_card_draft(&path, &draft),
+            (Dialog::DeleteSkin(path, _), Choice::Accept) => self.delete_skin(&path),
             _ => {}
         }
     }
@@ -1828,9 +1919,11 @@ impl eframe::App for App {
         egui::Panel::top("menu").show(ui, |ui| self.menu(ui));
         egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui, &ctx));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        egui::Panel::left("tools")
-            .default_size(260.0)
-            .show(ui, |ui| self.side(ui));
+        if self.settings.view != View::Library {
+            egui::Panel::left("tools")
+                .default_size(260.0)
+                .show(ui, |ui| self.side(ui));
+        }
         egui::CentralPanel::default_margins().show(ui, |ui| self.central(ui));
         self.settings_window(&ctx);
         self.log_window(&ctx);
@@ -1905,6 +1998,7 @@ fn blank_project() -> Project {
     Project {
         skin: Skin::blank(Model::Steve),
         pose: Default::default(),
+        card: Card::default(),
     }
 }
 

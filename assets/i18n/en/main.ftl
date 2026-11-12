@@ -203,3 +203,47 @@ log-empty = The log is empty.
 tab-close = Close tab
 tab-next = Next tab
 tab-prev = Previous tab
+
+view-library = Library
+library-search = Search by name or tag…
+library-favorites = ★ Favorites only
+library-new = New skin
+library-import = Import PNG…
+library-refresh = Refresh
+library-empty = The library is empty. Save a skin in this folder or import PNG files.
+library-no-match = No skin matches the search.
+library-no-dir = No folder was found for the library. Choose one in Settings → Library.
+status-library-imported =
+    { $count ->
+        [one] Imported 1 skin.
+       *[other] Imported { $count } skins.
+    }
+card-open = Open
+card-edit = Edit card…
+card-duplicate = Duplicate
+card-delete = Delete…
+card-favorite = Add to or remove from favorites
+card-more = More options
+card-title = Edit card
+card-name = Name
+card-name-hint = Empty: the file name is used
+card-tags = Tags
+card-tags-hint = Separated by commas
+card-favorite-check = Favorite
+card-background = Background
+card-add-background = Add background…
+card-save = Save
+card-delete-question = Delete “{ $name }”? The file is removed from the folder and this cannot be undone.
+card-delete-confirm = Delete
+bg-slate = Slate
+bg-sky = Sky
+bg-night = Night
+bg-meadow = Meadow
+bg-sunset = Sunset
+bg-cave = Cave
+settings-library = Library
+settings-library-dir = Folder
+settings-library-default = Use the default
+settings-card-size = Card size
+settings-clear-cache = Clear thumbnail cache
+status-cache-cleared = Thumbnail cache cleared.

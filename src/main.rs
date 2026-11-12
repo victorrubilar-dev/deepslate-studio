@@ -4,6 +4,7 @@
 mod core;
 mod editor;
 mod i18n;
+mod library;
 mod project;
 mod render3d;
 mod settings;

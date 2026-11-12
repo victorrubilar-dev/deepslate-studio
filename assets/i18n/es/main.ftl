@@ -204,3 +204,47 @@ log-empty = El registro está vacío.
 tab-close = Cerrar pestaña
 tab-next = Pestaña siguiente
 tab-prev = Pestaña anterior
+
+view-library = Biblioteca
+library-search = Buscar por nombre o etiqueta…
+library-favorites = ★ Solo favoritas
+library-new = Nueva skin
+library-import = Importar PNG…
+library-refresh = Actualizar
+library-empty = La biblioteca está vacía. Guarda una skin en esta carpeta o importa archivos PNG.
+library-no-match = Ninguna skin coincide con la búsqueda.
+library-no-dir = No se encontró una carpeta para la biblioteca. Elige una en Ajustes → Biblioteca.
+status-library-imported =
+    { $count ->
+        [one] Se importó 1 skin.
+       *[other] Se importaron { $count } skins.
+    }
+card-open = Abrir
+card-edit = Editar tarjeta…
+card-duplicate = Duplicar
+card-delete = Eliminar…
+card-favorite = Marcar o quitar de favoritas
+card-more = Más opciones
+card-title = Editar tarjeta
+card-name = Nombre
+card-name-hint = Vacío: se usa el nombre del archivo
+card-tags = Etiquetas
+card-tags-hint = Separadas por comas
+card-favorite-check = Favorita
+card-background = Fondo
+card-add-background = Agregar fondo…
+card-save = Guardar
+card-delete-question = ¿Eliminar «{ $name }»? Se borra el archivo de la carpeta y no se puede deshacer.
+card-delete-confirm = Eliminar
+bg-slate = Pizarra
+bg-sky = Cielo
+bg-night = Noche
+bg-meadow = Pradera
+bg-sunset = Atardecer
+bg-cave = Cueva
+settings-library = Biblioteca
+settings-library-dir = Carpeta
+settings-library-default = Usar la predeterminada
+settings-card-size = Tamaño de tarjetas
+settings-clear-cache = Limpiar caché de miniaturas
+status-cache-cleared = Se borró la caché de miniaturas.

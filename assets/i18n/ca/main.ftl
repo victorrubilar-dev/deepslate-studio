@@ -203,3 +203,47 @@ log-empty = El registre és buit.
 tab-close = Tanca la pestanya
 tab-next = Pestanya següent
 tab-prev = Pestanya anterior
+
+view-library = Biblioteca
+library-search = Cerca per nom o etiqueta…
+library-favorites = ★ Només preferides
+library-new = Skin nova
+library-import = Importa PNG…
+library-refresh = Actualitza
+library-empty = La biblioteca és buida. Desa una skin en aquesta carpeta o importa fitxers PNG.
+library-no-match = Cap skin coincideix amb la cerca.
+library-no-dir = No s'ha trobat cap carpeta per a la biblioteca. Tria'n una a Configuració → Biblioteca.
+status-library-imported =
+    { $count ->
+        [one] S'ha importat 1 skin.
+       *[other] S'han importat { $count } skins.
+    }
+card-open = Obre
+card-edit = Edita la targeta…
+card-duplicate = Duplica
+card-delete = Elimina…
+card-favorite = Marca o desmarca com a preferida
+card-more = Més opcions
+card-title = Edita la targeta
+card-name = Nom
+card-name-hint = Buit: es fa servir el nom del fitxer
+card-tags = Etiquetes
+card-tags-hint = Separades per comes
+card-favorite-check = Preferida
+card-background = Fons
+card-add-background = Afegeix un fons…
+card-save = Desa
+card-delete-question = Vols eliminar «{ $name }»? El fitxer s'esborra de la carpeta i no es pot desfer.
+card-delete-confirm = Elimina
+bg-slate = Pissarra
+bg-sky = Cel
+bg-night = Nit
+bg-meadow = Prat
+bg-sunset = Posta de sol
+bg-cave = Cova
+settings-library = Biblioteca
+settings-library-dir = Carpeta
+settings-library-default = Fes servir la predeterminada
+settings-card-size = Mida de les targetes
+settings-clear-cache = Neteja la memòria cau de miniatures
+status-cache-cleared = S'ha netejat la memòria cau de miniatures.
