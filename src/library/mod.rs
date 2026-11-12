@@ -1,5 +1,6 @@
 //! Biblioteca: tarjetas de las skins guardadas en una carpeta. Cada PNG de la carpeta es una
 //! tarjeta; sus datos (nombre, fondo, favorito, etiquetas) van dentro del propio PNG.
+//! Las subcarpetas de primer nivel son colecciones.
 
 pub mod backgrounds;
 
@@ -14,6 +15,17 @@ pub struct Entry {
     pub modified: Option<SystemTime>,
     /// Huella del contenido del archivo, para la caché de miniaturas.
     pub key: u64,
+    /// Subcarpeta donde está, o `None` si está en la raíz de la biblioteca.
+    pub collection: Option<String>,
+}
+
+/// Orden de las tarjetas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sort {
+    /// Favoritas primero y luego las editadas más recientemente.
+    Favorites,
+    Recent,
+    Name,
 }
 
 impl Entry {
@@ -55,14 +67,70 @@ fn is_png(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("png"))
 }
 
-/// Lee todas las skins de la carpeta: favoritas primero, luego las editadas más recientemente.
-/// Los archivos que no son skins válidas se saltan.
+/// Nombres de las colecciones (subcarpetas de primer nivel), en orden alfabético.
+pub fn collections(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    out.sort_by_key(|n| n.to_lowercase());
+    out
+}
+
+/// Nombre de colección válido como nombre de carpeta, o `None`.
+pub fn collection_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    let bad = name.is_empty()
+        || name.starts_with('.')
+        || name.chars().any(|c| {
+            matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()
+        });
+    (!bad).then(|| name.to_string())
+}
+
+/// Mueve un archivo de la biblioteca a una colección (o a la raíz con `None`). Devuelve la
+/// ruta nueva; si ya hay uno con ese nombre, usa otro libre.
+pub fn move_to(path: &Path, dir: &Path, collection: Option<&str>) -> std::io::Result<PathBuf> {
+    let target_dir = collection.map_or_else(|| dir.to_path_buf(), |c| dir.join(c));
+    if path.parent() == Some(target_dir.as_path()) {
+        return Ok(path.to_path_buf());
+    }
+    std::fs::create_dir_all(&target_dir)?;
+    let target = free_path(&target_dir, &stem(path));
+    std::fs::rename(path, &target)?;
+    Ok(target)
+}
+
+/// Lee todas las skins de la carpeta y de sus colecciones, favoritas primero y luego las
+/// editadas más recientemente. Los archivos que no son skins válidas se saltan.
 pub fn scan(dir: &Path) -> Vec<Entry> {
+    let mut out = scan_one(dir, None);
+    for c in collections(dir) {
+        out.extend(scan_one(&dir.join(&c), Some(c)));
+    }
+    sort(&mut out, Sort::Favorites);
+    out
+}
+
+pub fn sort(entries: &mut [Entry], by: Sort) {
+    match by {
+        Sort::Favorites => entries.sort_by(|a, b| {
+            (b.project.card.favorite, b.modified).cmp(&(a.project.card.favorite, a.modified))
+        }),
+        Sort::Recent => entries.sort_by_key(|e| std::cmp::Reverse(e.modified)),
+        Sort::Name => entries.sort_by_cached_key(|e| e.name().to_lowercase()),
+    }
+}
+
+fn scan_one(dir: &Path, collection: Option<String>) -> Vec<Entry> {
     let Ok(read) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut out: Vec<Entry> = read
-        .flatten()
+    read.flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file() && is_png(p))
         .filter_map(|path| {
@@ -77,13 +145,10 @@ pub fn scan(dir: &Path) -> Vec<Entry> {
                 key: h.finish(),
                 path,
                 project,
+                collection: collection.clone(),
             })
         })
-        .collect();
-    out.sort_by(|a, b| {
-        (b.project.card.favorite, b.modified).cmp(&(a.project.card.favorite, a.modified))
-    });
-    out
+        .collect()
 }
 
 /// Cambia los datos de tarjeta de un archivo sin tocar sus píxeles ni su pose.
@@ -212,5 +277,44 @@ mod tests {
         write(&dir, "x-2.png", Card::default());
         assert_eq!(free_path(&dir, "x"), dir.join("x-3.png"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn collections_scan_move_and_sort() {
+        let dir = temp_dir("collections");
+        write(&dir, "zeta.png", Card::default());
+        std::fs::create_dir(dir.join("Piratas")).unwrap();
+        write(&dir.join("Piratas"), "alfa.png", Card::default());
+        std::fs::create_dir(dir.join(".oculta")).unwrap();
+        assert_eq!(collections(&dir), ["Piratas"]);
+        let mut entries = scan(&dir);
+        sort(&mut entries, Sort::Name);
+        let got: Vec<_> = entries
+            .iter()
+            .map(|e| (e.name(), e.collection.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("alfa".into(), Some("Piratas".into())),
+                ("zeta".into(), None)
+            ]
+        );
+        // Mover a la colección; si el nombre está ocupado, usa otro.
+        write(&dir.join("Piratas"), "zeta.png", Card::default());
+        let moved = move_to(&dir.join("zeta.png"), &dir, Some("Piratas")).unwrap();
+        assert_eq!(moved, dir.join("Piratas").join("zeta-2.png"));
+        assert!(!dir.join("zeta.png").exists());
+        let back = move_to(&moved, &dir, None).unwrap();
+        assert_eq!(back, dir.join("zeta-2.png"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn collection_names_are_safe() {
+        assert_eq!(collection_name("  Piratas "), Some("Piratas".into()));
+        for bad in ["", "  ", "..", ".x", "a/b", "a\\b", "c:d"] {
+            assert_eq!(collection_name(bad), None, "{bad}");
+        }
     }
 }

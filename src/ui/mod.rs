@@ -531,6 +531,20 @@ impl App {
         }
     }
 
+    /// Un archivo abierto se movió: su pestaña pasa a guardar en la ruta nueva.
+    fn retarget_tab(&mut self, old: &Path, new: PathBuf) {
+        if let Some(i) = (0..self.tabs.len()).find(|&i| self.tab_path(i) == Some(old)) {
+            if i == self.active {
+                self.path = Some(new.clone());
+            } else {
+                self.tabs[i].path = Some(new.clone());
+            }
+        }
+        if self.settings.last_file.as_deref() == Some(old) {
+            self.remember_file(&new);
+        }
+    }
+
     /// Una pestaña sin archivo, sin cambios y sin historial: se puede reutilizar al abrir.
     fn active_is_untouched(&self) -> bool {
         self.path.is_none() && !self.editor.is_dirty() && !self.editor.can_undo()
@@ -616,8 +630,8 @@ impl App {
             Ok(project) => {
                 // Un PNG suelto se importa sin ruta, para que "Guardar" no lo sobrescriba sin
                 // preguntar. Los de la biblioteca sí la conservan: ya son copias de la app.
-                let in_library = library_view::library_dir(&self.settings)
-                    .is_some_and(|d| path.parent() == Some(d.as_path()));
+                let in_library =
+                    library_view::library_dir(&self.settings).is_some_and(|d| path.starts_with(d));
                 let is_project = project::is_project(&bytes) || in_library;
                 let key = if is_project {
                     "status-opened"
@@ -693,6 +707,7 @@ impl App {
         if library {
             if let Some(dir) = library_view::library_dir(&self.settings) {
                 if !skins.is_empty() {
+                    let dir = self.lib.current_dir(&dir);
                     self.import_files(&dir, skins);
                 }
                 if !others.is_empty() {

@@ -36,6 +36,11 @@ pub(super) struct LibraryState {
     pub return_view: View,
     /// Cuándo se entró a la biblioteca (segundos de egui): las tarjetas aparecen desde ahí.
     pub shown_at: f64,
+    /// Colección que se muestra; `None` muestra todas.
+    collection: Option<String>,
+    collections: Vec<String>,
+    sort: library::Sort,
+    new_collection: String,
 }
 
 impl Default for LibraryState {
@@ -50,6 +55,10 @@ impl Default for LibraryState {
             custom: HashMap::new(),
             return_view: View::ThreeD,
             shown_at: 0.0,
+            collection: None,
+            collections: Vec::new(),
+            sort: library::Sort::Favorites,
+            new_collection: String::new(),
         }
     }
 }
@@ -171,6 +180,8 @@ enum CardAction {
     Edit,
     Duplicate,
     Delete,
+    /// Mover a una colección, o a la raíz con `None`.
+    Move(Option<String>),
 }
 
 pub(super) fn library_dir(s: &Settings) -> Option<PathBuf> {
@@ -192,6 +203,14 @@ pub(super) fn clear_thumb_cache() -> std::io::Result<()> {
     match thumbs_dir() {
         Some(d) if d.exists() => std::fs::remove_dir_all(d),
         _ => Ok(()),
+    }
+}
+
+fn sort_name(i: &I18n, s: library::Sort) -> String {
+    match s {
+        library::Sort::Favorites => i.tr("sort-favorites"),
+        library::Sort::Recent => i.tr("sort-recent"),
+        library::Sort::Name => i.tr("sort-name"),
     }
 }
 
@@ -233,6 +252,13 @@ fn cover_uv(tex: &TextureHandle, rect: Rect) -> Rect {
 }
 
 impl LibraryState {
+    /// Carpeta donde entran las skins nuevas: la colección abierta o la raíz.
+    pub fn current_dir(&self, root: &Path) -> PathBuf {
+        self.collection
+            .as_ref()
+            .map_or_else(|| root.to_path_buf(), |c| root.join(c))
+    }
+
     pub fn clear_thumbs(&mut self) {
         self.thumbs.clear();
     }
@@ -277,6 +303,13 @@ impl App {
                 log::error!("biblioteca {}: {e}", dir.display());
             }
             self.lib.entries = library::scan(&dir);
+            library::sort(&mut self.lib.entries, self.lib.sort);
+            self.lib.collections = library::collections(&dir);
+            if let Some(c) = &self.lib.collection
+                && !self.lib.collections.contains(c)
+            {
+                self.lib.collection = None;
+            }
             self.lib.stale = false;
         }
         self.load_thumbs(ui.ctx());
@@ -299,6 +332,23 @@ impl App {
                 &mut self.lib.only_favorites,
                 (icons::image(ui.ctx(), star), i.tr("library-favorites")),
             );
+            let sort_before = self.lib.sort;
+            egui::ComboBox::from_id_salt("library-sort")
+                .selected_text(sort_name(i, self.lib.sort))
+                .show_ui(ui, |ui| {
+                    for s in [
+                        library::Sort::Favorites,
+                        library::Sort::Recent,
+                        library::Sort::Name,
+                    ] {
+                        ui.selectable_value(&mut self.lib.sort, s, sort_name(i, s));
+                    }
+                })
+                .response
+                .on_hover_text(i.tr("library-sort"));
+            if self.lib.sort != sort_before {
+                library::sort(&mut self.lib.entries, self.lib.sort);
+            }
             ui.separator();
             let new = egui::Button::image_and_text(
                 icons::image(ui.ctx(), Icon::Plus),
@@ -322,18 +372,66 @@ impl App {
         ui.add(
             egui::Label::new(RichText::new(dir.display().to_string()).weak().small()).truncate(),
         );
+        let mut created = None;
+        ui.horizontal_wrapped(|ui| {
+            let mut pick = |ui: &mut egui::Ui, c: Option<String>, label: &str| {
+                let on = self.lib.collection == c;
+                let resp = style::tab(ui, None, label, on);
+                if on {
+                    style::slide_marker(ui, egui::Id::unique("collection-marker"), resp.rect);
+                }
+                if resp.clicked() {
+                    self.lib.collection = c;
+                }
+            };
+            pick(ui, None, &i.tr("collection-all"));
+            for c in self.lib.collections.clone() {
+                pick(ui, Some(c.clone()), &c);
+            }
+            let new = style::menu_button(ui, Icon::Plus, i.tr("collection-new"))
+                .frame_when_inactive(false);
+            egui::containers::menu::MenuButton::from_button(new).ui(ui, |ui| {
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.lib.new_collection)
+                        .hint_text(i.tr("collection-name-hint")),
+                );
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button(i.tr("collection-create")).clicked() || enter {
+                    created = Some(std::mem::take(&mut self.lib.new_collection));
+                    ui.close();
+                }
+            });
+        });
+        if let Some(name) = created {
+            match library::collection_name(&name) {
+                Some(name) => match std::fs::create_dir_all(dir.join(&name)) {
+                    Ok(()) => {
+                        self.lib.collection = Some(name);
+                        self.lib.stale = true;
+                    }
+                    Err(e) => self.error(
+                        self.i18n
+                            .tr_args("error-io", &[("detail", e.to_string().into())]),
+                    ),
+                },
+                None => self.error(self.i18n.tr("error-collection-name")),
+            }
+        }
         ui.separator();
         if self.lib.entries.is_empty() {
             start = start.or(self.welcome(ui));
         }
         if let Some(s) = start {
-            return self.start(s, &dir);
+            let target = self.lib.current_dir(&dir);
+            return self.start(s, &target);
         }
 
         let shown: Vec<usize> = (0..self.lib.entries.len())
             .filter(|&k| {
                 let e = &self.lib.entries[k];
-                (!self.lib.only_favorites || e.project.card.favorite) && e.matches(&self.lib.query)
+                (!self.lib.only_favorites || e.project.card.favorite)
+                    && (self.lib.collection.is_none() || e.collection == self.lib.collection)
+                    && e.matches(&self.lib.query)
             })
             .collect();
         if shown.is_empty() {
@@ -534,6 +632,8 @@ impl App {
                     .image_tint_follows_text_color(true),
             )
             .on_hover_text(i.tr("card-more"));
+        let collections = &self.lib.collections;
+        let current = &self.lib.entries[k].collection;
         let menu = |ui: &mut egui::Ui, action: &mut Option<CardAction>| {
             for (a, label) in [
                 (CardAction::Open, i.tr("card-open")),
@@ -544,6 +644,20 @@ impl App {
                 if ui.button(label).clicked() {
                     *action = Some(a);
                 }
+            }
+            if !collections.is_empty() {
+                ui.menu_button(i.tr("card-move"), |ui| {
+                    let targets = std::iter::once((None, i.tr("collection-none")))
+                        .chain(collections.iter().map(|c| (Some(c.clone()), c.clone())));
+                    for (c, label) in targets {
+                        if ui
+                            .add_enabled(c != *current, egui::Button::new(label))
+                            .clicked()
+                        {
+                            *action = Some(CardAction::Move(c));
+                        }
+                    }
+                });
             }
         };
         egui::Popup::menu(&more).show(|ui| menu(ui, &mut action));
@@ -572,7 +686,9 @@ impl App {
                 self.dialog = Some(Dialog::EditCard(path, draft));
             }
             CardAction::Duplicate => {
-                let target = library::free_path(dir, &self.lib.entries[k].name());
+                // La copia queda en la misma colección que el original.
+                let folder = path.parent().unwrap_or(dir);
+                let target = library::free_path(folder, &self.lib.entries[k].name());
                 match std::fs::copy(&path, &target) {
                     Ok(_) => self.lib.stale = true,
                     Err(e) => self.error(
@@ -585,6 +701,16 @@ impl App {
                 let name = self.lib.entries[k].name();
                 self.dialog = Some(Dialog::DeleteSkin(path, name));
             }
+            CardAction::Move(c) => match library::move_to(&path, dir, c.as_deref()) {
+                Ok(new) => {
+                    self.retarget_tab(&path, new);
+                    self.lib.stale = true;
+                }
+                Err(e) => self.error(
+                    self.i18n
+                        .tr_args("error-io", &[("detail", e.to_string().into())]),
+                ),
+            },
         }
     }
 
