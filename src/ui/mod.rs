@@ -14,7 +14,9 @@ use crate::editor::templates::{self, Template};
 use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
 use crate::project::{self, Card, Project, ProjectError};
-use crate::render3d::{Camera, Hit, PRESETS, Pose, Preset, Renderer3d, Scene, pick, project};
+use crate::render3d::{
+    Camera, FOV_DEG, Hit, PRESETS, Pose, Preset, Renderer3d, Scene, pick, project,
+};
 use crate::settings::{Action, NamedColor, Settings, Shortcut, StartView, Theme, View};
 use eframe::egui::{
     self, Color32, ColorImage, Key, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind,
@@ -285,6 +287,8 @@ pub struct App {
     stamp: Option<RgbaImage>,
     /// Partes copiadas; se conservan al abrir otro archivo para pegarlas en él.
     clip: Option<(Skin, PartMask)>,
+    /// Arrastre con clic izquierdo que empezó fuera del personaje en la vista 3D.
+    panning: bool,
     /// Acción que espera una tecla en Ajustes → Atajos.
     binding: Option<Action>,
     bind_msg: String,
@@ -373,6 +377,7 @@ impl App {
             drag_from: None,
             stamp: None,
             clip: None,
+            panning: false,
             binding: None,
             bind_msg: String::new(),
             new_color_name: String::new(),
@@ -1704,10 +1709,36 @@ impl App {
         }
         self.sync_3d(preview);
         let (area, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        // Clic izquierdo fuera del personaje: arrastrar lo desplaza (cámara libre).
+        if resp.hovered() && ui.input(|i| i.pointer.primary_pressed()) {
+            self.panning = resp
+                .interact_pointer_pos()
+                .or(resp.hover_pos())
+                .is_some_and(|p| self.hit_3d(area, p).is_none());
+        }
+        if self.panning && resp.dragged_by(PointerButton::Primary) {
+            // Píxeles de pantalla a píxeles de la skin a la distancia del personaje.
+            let k = 2.0 * self.camera.distance * (FOV_DEG.to_radians() / 2.0).tan()
+                / area.height().max(1.0);
+            let d = resp.drag_delta() * k;
+            let [x, y] = self.camera.pan;
+            self.camera.pan = [
+                (x + d.x).clamp(-PAN_MAX, PAN_MAX),
+                (y - d.y).clamp(-PAN_MAX, PAN_MAX),
+            ];
+        }
+        // Un clic sin arrastrar fuera del personaje quita la selección de parte.
+        if self.panning && resp.clicked() && !preview {
+            self.selected = None;
+        }
+        let panning = self.panning;
+        if !ui.input(|i| i.pointer.primary_down()) {
+            self.panning = false;
+        }
         // En el editor el botón izquierdo pinta; se gira con el derecho o la rueda presionada.
         let rotating = resp.dragged_by(PointerButton::Secondary)
             || resp.dragged_by(PointerButton::Middle)
-            || (preview && resp.dragged_by(PointerButton::Primary));
+            || (preview && !panning && resp.dragged_by(PointerButton::Primary));
         if rotating {
             let d = resp.drag_delta() * 0.5 * self.settings.rotate_speed;
             self.camera.yaw += d.x;
@@ -1715,7 +1746,7 @@ impl App {
         }
         if resp.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            self.camera.distance = (self.camera.distance - scroll * 0.1).clamp(30.0, 160.0);
+            self.camera.distance = (self.camera.distance - scroll * 0.1).clamp(16.0, 160.0);
         }
         let aspect = area.width() / area.height().max(1.0);
         let painter = ui.painter_at(area);
@@ -1743,7 +1774,7 @@ impl App {
             }
         }
         // Con la animación en marcha no se pinta: el modelo no está en la pose de la skin.
-        let hover = if preview || self.anim.playing {
+        let hover = if preview || self.anim.playing || panning {
             None
         } else {
             self.paint_3d(ui, &resp, area)
@@ -2481,6 +2512,8 @@ fn swatch(ui: &mut egui::Ui, c: [u8; 4]) -> egui::Response {
 }
 
 const PALETTE_IMPORT_MAX: usize = 32;
+/// Cuánto se puede desplazar la cámara libre, en píxeles de la skin.
+const PAN_MAX: f32 = 40.0;
 
 fn shortcut_of(key: Key, m: egui::Modifiers) -> Shortcut {
     Shortcut {

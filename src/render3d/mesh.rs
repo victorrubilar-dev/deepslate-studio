@@ -18,12 +18,14 @@ pub struct Vertex {
     pub part: f32,
 }
 
-/// Ángulos de la cámara, en grados, y distancia al centro del personaje.
+/// Ángulos de la cámara, en grados, distancia al centro del personaje y desplazamiento
+/// en el plano de la pantalla (en píxeles de la skin: derecha y arriba).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     pub distance: f32,
+    pub pan: [f32; 2],
 }
 
 impl Default for Camera {
@@ -32,6 +34,7 @@ impl Default for Camera {
             yaw: -25.0,
             pitch: 22.0,
             distance: 70.0,
+            pan: [0.0; 2],
         }
     }
 }
@@ -43,6 +46,7 @@ impl Camera {
             yaw: -25.0,
             pitch: 10.0,
             distance: 66.0,
+            pan: [0.0; 2],
         }
     }
 }
@@ -172,7 +176,10 @@ fn view_xf(cam: &Camera) -> Xf {
     let r = mul(rot([cam.pitch, 0.0, 0.0]), rot([0.0, cam.yaw, 0.0]));
     Xf {
         r,
-        t: apply(r, sub([0.0; 3], CENTER)),
+        t: add(
+            apply(r, sub([0.0; 3], CENTER)),
+            [cam.pan[0], cam.pan[1], 0.0],
+        ),
     }
 }
 
@@ -483,6 +490,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             distance: 70.0,
+            pan: [0.0; 2],
         };
         let (base, _) = build(Model::Steve, &Pose::default(), &cam, &all);
         // La cara frontal de la cabeza es la que tiene normal +Z y UV dentro de (8,8)-(16,16).
@@ -511,6 +519,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             distance: 70.0,
+            pan: [0.0; 2],
         };
         let pick_at = |p, vis: &dyn Fn(Part, Layer) -> bool| {
             pick(
@@ -539,6 +548,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             distance: 70.0,
+            pan: [0.0; 2],
         };
         // Apunta al punto (-1.5, 29.5) del frente de la cabeza base (z = 4, a 66 de la cámara).
         let h = (FOV_DEG.to_radians() / 2.0).tan();
@@ -565,6 +575,7 @@ mod tests {
             yaw: -90.0,
             pitch: 0.0,
             distance: 70.0,
+            pan: [0.0; 2],
         };
         let only_base = |_: Part, l: Layer, _: u32, _: u32| l == Layer::Base;
         let hit = pick(
@@ -591,6 +602,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 0.0,
                 distance: 70.0,
+                pan: [0.0; 2],
             },
             &all,
         );
@@ -611,6 +623,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             distance: 70.0,
+            pan: [0.0; 2],
         };
         let v = cape(&Pose::default(), &cam);
         assert_eq!(v.len(), 36);
@@ -621,5 +634,39 @@ mod tests {
         // El centro del personaje cae en el centro de la pantalla.
         let c = project(&cam, 1.0, CENTER).unwrap();
         assert!(c[0].abs() < 1e-5 && c[1].abs() < 1e-5);
+    }
+
+    #[test]
+    fn pan_moves_view_and_picking_follows() {
+        let cam = Camera {
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 70.0,
+            pan: [6.0, -10.0],
+        };
+        // El centro de la cabeza se corre a la derecha y hacia abajo en pantalla.
+        let head = [0.0, 28.0, 4.0];
+        let p = project(&cam, 1.0, head).unwrap();
+        let still = project(
+            &Camera {
+                pan: [0.0; 2],
+                ..cam
+            },
+            1.0,
+            head,
+        )
+        .unwrap();
+        assert!(p[0] > still[0] && p[1] < still[1]);
+        // Y lo que se ve ahí sigue siendo la cabeza.
+        let hit = pick(
+            Model::Steve,
+            &Pose::default(),
+            &cam,
+            &|_, _| true,
+            &|_, _, _, _| true,
+            1.0,
+            (p[0], p[1]),
+        );
+        assert_eq!(hit.map(|h| h.part), Some(Part::Head));
     }
 }
