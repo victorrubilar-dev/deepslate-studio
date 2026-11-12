@@ -100,7 +100,7 @@ Las dependencias entre módulos van en un solo sentido: `ui` usa todo lo demás;
 
 ## Cómo trabajar
 
-- **Por hitos.** El alcance y el orden de los hitos están en `SPEC.md`. No adelantes funciones de un hito posterior.
+- **Alcance.** Lo decide el usuario. Fuera de alcance salvo que lo pida: cuentas y sincronización en la nube, subir skins a servicios de terceros y otros formatos del juego (Bedrock, paquetes de recursos, mods).
 - **Plan antes que código.** Antes de un cambio grande (un módulo nuevo, un cambio de formato o una dependencia), propón el plan y espera confirmación.
 - **Commits** en español, en tiempo presente, cortos y descriptivos. Por ejemplo: «Agrega espejo por parte».
 - **Ramas:** el trabajo de cada hito va en su propia rama y se une a `master` cuando el usuario lo aprueba.
