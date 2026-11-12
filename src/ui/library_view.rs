@@ -1,6 +1,8 @@
 //! Pantalla de biblioteca: tarjetas con fondo, personaje en su pose y datos.
 
-use super::{App, Dialog, blank_project, file_name, style};
+use super::{App, Dialog, blank_project, file_name, png_dialog, style};
+use crate::core::Model;
+use crate::editor::templates::{self, Template};
 use crate::i18n::I18n;
 use crate::library::{self, backgrounds};
 use crate::project::{self, Background, Card};
@@ -10,6 +12,7 @@ use eframe::egui::{
     self, Color32, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions,
     UiBuilder, Vec2,
 };
+use image::Rgba;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -78,6 +81,78 @@ impl CardDraft {
         card.favorite = self.favorite;
         card.background = self.background.clone();
     }
+}
+
+/// Formas de empezar una skin, en la bienvenida y en el menú «Nueva skin».
+#[derive(Clone, Copy)]
+pub(super) enum Start {
+    Empty(Model),
+    Base,
+    Open,
+    Import,
+}
+
+fn start_options(i: &I18n) -> [(Start, String, String); 5] {
+    [
+        (
+            Start::Empty(Model::Steve),
+            i.tr("start-empty-steve"),
+            i.tr("start-steve-desc"),
+        ),
+        (
+            Start::Empty(Model::Alex),
+            i.tr("start-empty-alex"),
+            i.tr("start-alex-desc"),
+        ),
+        (Start::Base, i.tr("start-base"), i.tr("start-base-desc")),
+        (Start::Open, i.tr("start-open"), i.tr("start-open-desc")),
+        (
+            Start::Import,
+            i.tr("start-import"),
+            i.tr("start-import-desc"),
+        ),
+    ]
+}
+
+/// Botón grande de la bienvenida, con el mismo aspecto de bloque que las tarjetas.
+fn tile(ui: &mut egui::Ui, title: &str, desc: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(250.0, 76.0), Sense::click());
+    let p = ui.painter();
+    let v = ui.visuals();
+    p.rect_filled(
+        rect.translate(Vec2::splat(5.0)),
+        0.0,
+        Color32::from_black_alpha(120),
+    );
+    let fill = if resp.hovered() {
+        v.widgets.hovered.bg_fill
+    } else {
+        v.widgets.inactive.bg_fill
+    };
+    p.rect_filled(rect, 0.0, fill);
+    let edge = if resp.hovered() {
+        style::ACCENT
+    } else {
+        Color32::from_black_alpha(200)
+    };
+    p.rect_stroke(rect, 0.0, Stroke::new(2.0, edge), StrokeKind::Outside);
+    let inner = rect.shrink2(Vec2::new(14.0, 12.0));
+    let text = v.strong_text_color();
+    p.text(
+        inner.left_top(),
+        egui::Align2::LEFT_TOP,
+        title,
+        style::pixel_font(18.0),
+        text,
+    );
+    let desc = p.layout(
+        desc.to_string(),
+        egui::FontId::proportional(12.5),
+        v.weak_text_color(),
+        inner.width(),
+    );
+    p.galley(inner.left_top() + Vec2::new(0.0, 26.0), desc, text);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 enum CardAction {
@@ -197,8 +272,7 @@ impl App {
         self.load_thumbs(ui.ctx());
 
         let i = &self.i18n;
-        let mut new = false;
-        let mut import = false;
+        let mut start = None;
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.lib.query)
@@ -207,8 +281,13 @@ impl App {
             );
             ui.toggle_value(&mut self.lib.only_favorites, i.tr("library-favorites"));
             ui.separator();
-            new = ui.button(i.tr("library-new")).clicked();
-            import = ui.button(i.tr("library-import")).clicked();
+            ui.menu_button(i.tr("library-new"), |ui| {
+                for (s, title, desc) in start_options(i) {
+                    if ui.button(title).on_hover_text(desc).clicked() {
+                        start = Some(s);
+                    }
+                }
+            });
             if ui.button(i.tr("library-refresh")).clicked() {
                 self.lib.stale = true;
             }
@@ -217,13 +296,11 @@ impl App {
             egui::Label::new(RichText::new(dir.display().to_string()).weak().small()).truncate(),
         );
         ui.separator();
-        if new {
-            self.new_tab(blank_project(), None);
-            self.settings.view = self.lib.return_view;
-            return;
+        if self.lib.entries.is_empty() {
+            start = start.or(self.welcome(ui));
         }
-        if import {
-            self.import_to_library(&dir);
+        if let Some(s) = start {
+            return self.start(s, &dir);
         }
 
         let shown: Vec<usize> = (0..self.lib.entries.len())
@@ -233,13 +310,10 @@ impl App {
             })
             .collect();
         if shown.is_empty() {
-            let key = if self.lib.entries.is_empty() {
-                "library-empty"
-            } else {
-                "library-no-match"
-            };
-            ui.add_space(24.0);
-            ui.vertical_centered(|ui| ui.label(self.i18n.tr(key)));
+            if !self.lib.entries.is_empty() {
+                ui.add_space(24.0);
+                ui.vertical_centered(|ui| ui.label(self.i18n.tr("library-no-match")));
+            }
             return;
         }
         let mut action = None;
@@ -255,6 +329,74 @@ impl App {
         });
         if let Some((k, a)) = action {
             self.card_action(k, a, &dir);
+        }
+    }
+
+    /// Bienvenida de la biblioteca vacía: opciones grandes para empezar.
+    fn welcome(&self, ui: &mut egui::Ui) -> Option<Start> {
+        let i = &self.i18n;
+        let mut start = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label(RichText::new(i.tr("home-title")).font(style::pixel_font(30.0)));
+                ui.add_space(6.0);
+                ui.label(i.tr("home-subtitle"));
+                ui.add_space(24.0);
+            });
+            // Rejilla centrada: tantas columnas como entren.
+            let cols = ((ui.available_width() + 20.0) / 270.0)
+                .floor()
+                .clamp(1.0, 3.0) as usize;
+            let width = cols as f32 * 270.0 - 20.0;
+            ui.horizontal(|ui| {
+                ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+                egui::Grid::new("welcome")
+                    .spacing(Vec2::splat(20.0))
+                    .show(ui, |ui| {
+                        for (k, (s, title, desc)) in start_options(i).into_iter().enumerate() {
+                            if tile(ui, &title, &desc).clicked() {
+                                start = Some(s);
+                            }
+                            if (k + 1) % cols == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+            });
+            ui.vertical_centered(|ui| {
+                ui.add_space(28.0);
+                ui.weak(i.tr("home-drop-hint"));
+            });
+        });
+        start
+    }
+
+    fn start(&mut self, s: Start, dir: &Path) {
+        let to_editor = match s {
+            Start::Empty(model) => {
+                let mut p = blank_project();
+                p.skin = crate::core::Skin::blank(model);
+                self.new_tab(p, None);
+                true
+            }
+            Start::Base => {
+                let mut p = blank_project();
+                p.skin.pixels = templates::draw(Template::Base, Model::Steve, Rgba([0; 4]));
+                self.new_tab(p, None);
+                true
+            }
+            Start::Open => png_dialog().pick_file().is_some_and(|p| self.open_path(p)),
+            Start::Import => {
+                if let Some(files) = png_dialog().pick_files() {
+                    self.import_files(dir, files);
+                }
+                false
+            }
+        };
+        if to_editor {
+            self.settings.view = self.lib.return_view;
+            self.settings_changed = true;
         }
     }
 
@@ -430,13 +572,9 @@ impl App {
         }
     }
 
-    fn import_to_library(&mut self, dir: &Path) {
-        let Some(files) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
-            .pick_files()
-        else {
-            return;
-        };
+    /// Copia a la biblioteca las skins válidas de `files`; las demás se saltan.
+    /// Devuelve cuántas entraron.
+    pub(super) fn import_files(&mut self, dir: &Path, files: Vec<PathBuf>) -> usize {
         let mut count = 0;
         for src in files {
             let ok = std::fs::read(&src)
@@ -458,6 +596,7 @@ impl App {
             .i18n
             .tr_args("status-library-imported", &[("count", count.into())]);
         self.lib.stale = true;
+        count
     }
 
     /// Carga miniaturas de la caché en disco o las dibuja con la vista 3D (unas pocas por cuadro).

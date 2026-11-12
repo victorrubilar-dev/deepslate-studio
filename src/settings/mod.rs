@@ -18,6 +18,8 @@ pub enum View {
 /// Vista al abrir la app: la última usada o una fija.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StartView {
+    /// La biblioteca, como página de inicio.
+    Library,
     Last,
     Flat,
     ThreeD,
@@ -211,7 +213,7 @@ impl Default for Settings {
             recent_colors: Vec::new(),
             palette: Vec::new(),
             language: SYSTEM_LANGUAGE.into(),
-            start_view: StartView::Last,
+            start_view: StartView::Library,
             open_last: false,
             last_file: None,
             autosave: false,

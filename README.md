@@ -10,6 +10,10 @@
 
 ## Funciones
 
+### Inicio
+- La app abre en la biblioteca. La primera vez, una bienvenida ofrece empezar con una skin vacía (Steve o Alex), con la plantilla base, abriendo un archivo o importando tus PNG.
+- **Arrastrar y soltar:** suelta skins desde el explorador de archivos para abrirlas, o sobre la biblioteca para agregarlas. Una imagen que no es skin abre «Imagen al frente».
+
 ### Biblioteca
 - **Tarjetas** con el personaje en su pose, un fondo, el modelo, la fecha de la última edición y una estrella de favorita.
 - **Seis fondos** dibujados para la app, o un fondo propio desde cualquier PNG.

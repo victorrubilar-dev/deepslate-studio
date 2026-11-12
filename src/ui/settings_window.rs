@@ -194,6 +194,7 @@ fn general(ui: &mut egui::Ui, i: &I18n, s: &mut Settings) {
                 "start-view",
                 &mut s.start_view,
                 &[
+                    (StartView::Library, i.tr("view-library")),
                     (StartView::Last, i.tr("start-view-last")),
                     (StartView::Flat, i.tr("view-2d")),
                     (StartView::ThreeD, i.tr("view-3d")),

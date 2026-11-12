@@ -299,6 +299,7 @@ impl App {
         let mut settings = settings;
         match settings.start_view {
             StartView::Last => {}
+            StartView::Library => settings.view = View::Library,
             StartView::Flat => settings.view = View::Flat,
             StartView::ThreeD => settings.view = View::ThreeD,
         }
@@ -372,8 +373,14 @@ impl App {
             new_color_name: String::new(),
         };
         app.tool = start_tool;
-        if let Some(path) = last.filter(|p| p.exists()) {
-            app.open_path(path);
+        let from_args = std::env::args_os().nth(1).is_some();
+        if let Some(path) = last.filter(|p| p.exists())
+            && app.open_path(path)
+            && from_args
+            && app.settings.view == View::Library
+        {
+            // Abrir un archivo desde el explorador lleva directo al editor.
+            app.settings.view = View::Flat;
         }
         app
     }
@@ -558,17 +565,20 @@ impl App {
         }
     }
 
-    fn open_path(&mut self, path: PathBuf) {
+    /// Devuelve `true` si la skin quedó abierta en una pestaña.
+    fn open_path(&mut self, path: PathBuf) -> bool {
         if let Some(i) = (0..self.tabs.len()).find(|&i| self.tab_path(i) == Some(path.as_path())) {
-            return self.switch_tab(i);
+            self.switch_tab(i);
+            return true;
         }
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
-                return self.error(
+                self.error(
                     self.i18n
                         .tr_args("error-io", &[("detail", e.to_string().into())]),
                 );
+                return false;
             }
         };
         match project::load(&bytes) {
@@ -592,8 +602,82 @@ impl App {
                 } else {
                     self.new_tab(project, path);
                 }
+                true
             }
-            Err(e) => self.error(self.load_error(e)),
+            Err(e) => {
+                self.error(self.load_error(e));
+                false
+            }
+        }
+    }
+
+    /// Archivos soltados desde el explorador. En la biblioteca, las skins se copian ahí;
+    /// en el editor se abren, y una imagen que no es skin va a «Imagen al frente».
+    fn handle_drops(&mut self, ctx: &egui::Context) {
+        let (hovering, dropped) = ctx.input(|i| {
+            let paths: Vec<PathBuf> = i
+                .raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect();
+            (!i.raw.hovered_files.is_empty(), paths)
+        });
+        let library = self.settings.view == View::Library;
+        if hovering {
+            let key = if library { "drop-library" } else { "drop-open" };
+            let rect = ctx.content_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::unique("drop"),
+            ));
+            painter.rect_filled(rect, 0.0, Color32::from_black_alpha(170));
+            painter.rect_stroke(
+                rect.shrink(12.0),
+                0.0,
+                Stroke::new(3.0, ACCENT),
+                StrokeKind::Inside,
+            );
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                self.i18n.tr(key),
+                style::pixel_font(32.0),
+                Color32::WHITE,
+            );
+        }
+        if dropped.is_empty() || self.dialog.is_some() {
+            return;
+        }
+        let (skins, others): (Vec<PathBuf>, Vec<PathBuf>) = dropped
+            .into_iter()
+            .partition(|p| std::fs::read(p).is_ok_and(|b| project::load(&b).is_ok()));
+        if library {
+            if let Some(dir) = library_view::library_dir(&self.settings) {
+                if !skins.is_empty() {
+                    self.import_files(&dir, skins);
+                }
+                if !others.is_empty() {
+                    self.error(self.i18n.tr("error-drop-library"));
+                }
+            }
+            return;
+        }
+        for p in skins {
+            self.open_path(p);
+        }
+        if let Some(p) = others.into_iter().next() {
+            match image::open(&p) {
+                Ok(img) => {
+                    self.dialog = Some(Dialog::ImportImage(Box::new(ImportState::new(
+                        img.into_rgba8(),
+                    ))))
+                }
+                Err(e) => {
+                    log::warn!("soltado {}: {e}", p.display());
+                    self.error(self.i18n.tr("error-image"));
+                }
+            }
         }
     }
 
@@ -2200,6 +2284,7 @@ impl eframe::App for App {
             self.i18n = I18n::new(lang);
         }
         self.handle_close(&ctx);
+        self.handle_drops(&ctx);
         self.shortcuts(&ctx);
         self.autosave(&ctx);
         egui::Panel::top("menu").show(ui, |ui| self.menu(ui));
