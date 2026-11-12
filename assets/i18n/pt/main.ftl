@@ -328,3 +328,7 @@ collection-name-hint = Nome da coleção
 collection-create = Criar
 card-move = Mover para
 error-collection-name = Esse nome não serve para uma coleção. Não pode estar vazio, começar com ponto nem ter / \ : * ? " < > |
+recover-question = Da última vez o app fechou de forma inesperada e ficaram { $count } skins com alterações não salvas. Quer recuperá-las?
+recover-yes = Recuperar
+recover-no = Descartar
+status-recovered = { $count } skins recuperadas. Salve-as para não perdê-las.

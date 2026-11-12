@@ -328,3 +328,7 @@ collection-name-hint = Collection name
 collection-create = Create
 card-move = Move to
 error-collection-name = That name can't be used for a collection. It can't be empty, start with a dot or contain / \ : * ? " < > |
+recover-question = Last time the app closed unexpectedly and { $count } skins had unsaved changes. Do you want to recover them?
+recover-yes = Recover
+recover-no = Discard
+status-recovered = { $count } skins recovered. Save them so you don't lose them.

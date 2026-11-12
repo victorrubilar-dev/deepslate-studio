@@ -75,6 +75,8 @@ enum Dialog {
     ReplaceColor(Hsva, Hsva, bool),
     /// Lado en píxeles y fondo transparente.
     Render(u32, bool),
+    /// Skins con cambios que quedaron de un cierre inesperado.
+    Recover(Vec<PathBuf>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -299,6 +301,7 @@ pub struct App {
     line_from: Option<(u32, u32)>,
     /// Escala de la interfaz ya aplicada a egui.
     applied_scale: f32,
+    last_recovery: f64,
     /// Acción que espera una tecla en Ajustes → Atajos.
     binding: Option<Action>,
     bind_msg: String,
@@ -391,11 +394,23 @@ impl App {
             brush: 1,
             line_from: None,
             applied_scale: 0.0,
+            last_recovery: 0.0,
             binding: None,
             bind_msg: String::new(),
             new_color_name: String::new(),
         };
         app.tool = start_tool;
+        let leftovers: Vec<PathBuf> = recovery_dir()
+            .and_then(|d| std::fs::read_dir(d).ok())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "png"))
+            .collect();
+        if !leftovers.is_empty() {
+            app.dialog = Some(Dialog::Recover(leftovers));
+        }
         let from_args = std::env::args_os().nth(1).is_some();
         if let Some(path) = last.filter(|p| p.exists())
             && app.open_path(path)
@@ -878,6 +893,64 @@ impl App {
             }
         }
         self.last_autosave = now;
+    }
+
+    /// Cada minuto copia las pestañas con cambios a la carpeta de recuperación, aunque no
+    /// tengan archivo. Al cerrar bien la app se borra; si queda algo, el cierre fue inesperado.
+    fn write_recovery(&mut self, ctx: &egui::Context) {
+        ctx.request_repaint_after(std::time::Duration::from_secs(60));
+        let now = ctx.input(|i| i.time);
+        // Mientras se pregunta si recuperar, no se pisa lo que quedó de la vez anterior.
+        if now - self.last_recovery < 60.0
+            || self.painting
+            || matches!(self.dialog, Some(Dialog::Recover(_)))
+        {
+            return;
+        }
+        self.last_recovery = now;
+        let Some(dir) = recovery_dir() else {
+            return;
+        };
+        // shortcut: una sola carpeta para todas las ventanas de la app; con dos abiertas a la
+        // vez, la última que escribe gana. Usar una subcarpeta por proceso si llega a importar.
+        let _ = std::fs::remove_dir_all(&dir);
+        let active = std::iter::once((&self.editor, &self.card));
+        let others = (0..self.tabs.len())
+            .filter(|&i| i != self.active)
+            .map(|i| (&self.tabs[i].editor, &self.tabs[i].card));
+        for (k, (editor, card)) in active.chain(others).enumerate() {
+            if !editor.is_dirty() {
+                continue;
+            }
+            let file = dir.join(format!("{k}.png"));
+            let written = std::fs::create_dir_all(&dir).and_then(|()| {
+                std::fs::write(&file, project::save(editor.skin(), editor.pose(), card))
+            });
+            if let Err(e) = written {
+                log::warn!("recuperación {}: {e}", file.display());
+            }
+        }
+    }
+
+    /// Abre como pestañas nuevas, sin archivo y con cambios, las skins de la recuperación.
+    fn recover(&mut self, files: &[PathBuf]) {
+        let mut count = 0;
+        for f in files {
+            match std::fs::read(f)
+                .map_err(|e| e.to_string())
+                .and_then(|b| project::load(&b).map_err(|e| format!("{e:?}")))
+            {
+                Ok(p) => {
+                    self.new_tab(p, None);
+                    self.editor.mark_unsaved();
+                    count += 1;
+                }
+                Err(e) => log::warn!("no se recuperó {}: {e}", f.display()),
+            }
+        }
+        self.status = self
+            .i18n
+            .tr_args("status-recovered", &[("count", count.into())]);
     }
 
     fn error(&mut self, msg: String) {
@@ -2579,6 +2652,16 @@ impl App {
                     ],
                 )
             }
+            Dialog::Recover(files) => {
+                ui.label(i.tr_args("recover-question", &[("count", files.len().into())]));
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("recover-yes")),
+                        (Choice::Alternate, i.tr("recover-no")),
+                    ],
+                )
+            }
             Dialog::DeleteSkin(_, name) => {
                 ui.label(library_view::delete_question(i, name));
                 buttons(
@@ -2628,6 +2711,17 @@ impl App {
             }
             (Dialog::EditCard(path, draft), Choice::Accept) => self.save_card_draft(&path, &draft),
             (Dialog::DeleteSkin(path, _), Choice::Accept) => self.delete_skin(&path),
+            (Dialog::Recover(files), Choice::Accept) => {
+                self.recover(&files);
+                if let Some(d) = recovery_dir() {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+            }
+            (Dialog::Recover(_), Choice::Alternate) => {
+                if let Some(d) = recovery_dir() {
+                    let _ = std::fs::remove_dir_all(d);
+                }
+            }
             (Dialog::ReplaceColor(from, to, part_only), Choice::Accept) => {
                 let part = self.selected.filter(|_| part_only);
                 self.editor.replace_color(
@@ -2654,6 +2748,13 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Cierre normal: lo que haya en la carpeta de recuperación ya no hace falta.
+    fn on_exit(&mut self) {
+        if let Some(d) = recovery_dir() {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // El idioma se cambia en caliente desde Ajustes.
@@ -2671,6 +2772,7 @@ impl eframe::App for App {
         self.handle_drops(&ctx);
         self.shortcuts(&ctx);
         self.autosave(&ctx);
+        self.write_recovery(&ctx);
         egui::Panel::top("menu").show(ui, |ui| self.menu(ui));
         egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui, &ctx));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
@@ -2875,6 +2977,10 @@ fn skin_image(skin: &Skin, visible: impl Fn(Part, Layer) -> bool) -> ColorImage 
         }
     }
     ColorImage::from_rgba_unmultiplied([64, 64], px.as_raw())
+}
+
+fn recovery_dir() -> Option<PathBuf> {
+    crate::settings::log::data_dir().map(|d| d.join("recuperacion"))
 }
 
 fn png_dialog() -> rfd::FileDialog {

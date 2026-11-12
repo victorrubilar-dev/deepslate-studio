@@ -17,8 +17,9 @@
 ### Biblioteca
 - **Tarjetas** con el personaje en su pose, un fondo, el modelo, la fecha de la última edición y una estrella de favorita.
 - **Seis fondos** dibujados para la app, o un fondo propio desde cualquier PNG.
-- **Búsqueda** por nombre o etiqueta, y filtro de favoritas.
-- **Desde cada tarjeta:** abrir, editar, duplicar o eliminar.
+- **Búsqueda** por nombre o etiqueta, filtro de favoritas y orden por favoritas, fecha o nombre.
+- **Colecciones:** agrupa las skins en colecciones, que son subcarpetas de la biblioteca.
+- **Desde cada tarjeta:** abrir, editar, duplicar, mover a otra colección o eliminar.
 - Los datos de la tarjeta van dentro del PNG: si mueves o compartes el archivo, se van con él.
 
 ### Pestañas
@@ -26,10 +27,12 @@
 
 ### Edición
 - **Lienzo 2D:** la textura desplegada, editable píxel a píxel, con cuadrícula opcional y el nombre de cada parte.
-- **Pintar en 3D:** el lápiz, el borrador, el bote y el cuentagotas también funcionan sobre el personaje en 3D, con el píxel bajo el cursor resaltado. Se gira con el botón derecho y se acerca con la rueda.
-- **Herramientas:** lápiz, borrador, bote de pintura, cuentagotas, degradado, sello y selección rectangular.
+- **Vista 3D por defecto:** el lápiz, el borrador, aclarar, oscurecer, el bote y el cuentagotas funcionan sobre el personaje en 3D, con el píxel bajo el cursor resaltado. Se gira con el botón derecho, se acerca con la rueda y se mueve arrastrando fuera del personaje.
+- **Vista dividida** opcional: el lienzo 2D al lado del 3D.
+- **Herramientas:** lápiz, borrador, aclarar, oscurecer, bote de pintura, cuentagotas, degradado, sello y selección rectangular. Pincel de 1×1 o 2×2, y línea recta con Shift + clic.
+- **Reemplazar color** en toda la skin o en una parte, y **variar tono** para darle textura a un área de un solo color.
 - **Espejo:** lo que pintas en un brazo o una pierna se copia al lado opuesto. Funciona para todo el cuerpo o solo para la parte elegida.
-- **Capas:** capa base y capa exterior. Cada parte y cada capa se puede mostrar u ocultar por separado.
+- **Capas:** capa base y capa exterior. Cada parte y cada capa se puede mostrar u ocultar por separado, y la capa exterior entera con una tecla (H).
 - **Imagen al frente:** cualquier PNG o JPEG, recortado y ajustado, pintado sobre el frente de todo el cuerpo.
 - **Plantillas:** una base para empezar, más camiseta, pantalón, pelo y armadura para poner encima.
 - **Deshacer y rehacer** en todas las operaciones.
@@ -41,7 +44,7 @@
 - Importación de paleta desde cualquier imagen o skin.
 
 ### Modelos y partes
-- **Steve y Alex** (brazos de 4 y 3 píxeles), con conversión y vista de antes y después.
+- **Steve y Alex** (brazos de 4 y 3 píxeles), con conversión y vista previa en 3D de antes y después.
 - **Skins antiguas de 64×32:** se abren y se convierten solas al formato 64×64.
 - **Copiar y pegar partes** entre skins, eligiendo cuáles entran.
 
@@ -50,7 +53,8 @@
 - **Ajuste fino:** cada articulación se gira a mano con controles deslizantes.
 - **Animación** de ida y vuelta entre dos poses, o entre una pose y su espejo (para caminar o correr).
 - Fondo, iluminación, sombra en el suelo y velocidad de giro configurables.
-- **Captura** de la vista 3D a PNG con fondo transparente.
+- **Cámara:** vistas de frente, espalda y lado (1, 2, 3) y enfocar la parte seleccionada (4).
+- **Exportar render** de la vista 3D a PNG de 512, 1024 o 2048 píxeles, con fondo transparente o de color.
 
 ### Vista previa
 - Muestra la skin sobre un maniquí, la skin actual u otra skin cargada.
@@ -60,10 +64,11 @@
 - El proyecto es un **PNG normal**: lo abre cualquier visor de imágenes y lo acepta el juego. El modelo y la pose van guardados dentro del PNG.
 - **Exportar rápido** a una carpeta fija, con plantilla de nombre (`{name}`, `{model}`).
 - Abre la última skin al iniciar y tiene autoguardado (opcional).
+- **Recuperación:** si la app se cierra de forma inesperada, al volver a abrirla ofrece recuperar las skins con cambios sin guardar.
 
 ### Ajustes
 - Atajos de teclado editables, con aviso si una combinación ya está en uso.
-- Tema claro, oscuro o del sistema, tamaño de píxel, niveles de deshacer, vista y herramienta al iniciar.
+- Tema claro, oscuro o del sistema, escala de la interfaz, reducir animaciones, tamaño de píxel, niveles de deshacer, vista y herramienta al iniciar.
 - Registro de errores visible desde la propia app.
 
 ## Descargas

@@ -106,6 +106,12 @@ impl Editor {
         self.saved_revision = self.revision;
     }
 
+    /// Queda con cambios sin guardar aunque no tenga historial (p. ej. una skin recuperada).
+    pub fn mark_unsaved(&mut self) {
+        // `revision` solo sube de a uno, así que nunca llega a este valor.
+        self.saved_revision = u64::MAX;
+    }
+
     pub fn set_limit(&mut self, limit: usize) {
         self.limit = limit;
         self.trim();
@@ -735,5 +741,18 @@ mod tests {
         assert!(px.iter().any(|c| *c != grey), "debería cambiar algo");
         assert_eq!(e.pick(0, 0), TRANSPARENT);
         assert_eq!(e.undo.len(), 2);
+    }
+
+    #[test]
+    fn mark_unsaved_stays_dirty_until_saved() {
+        let mut e = editor();
+        e.mark_unsaved();
+        assert!(e.is_dirty());
+        e.begin_stroke();
+        e.paint_line((9, 9), (9, 9), RED);
+        e.end_stroke();
+        assert!(e.is_dirty());
+        e.mark_saved();
+        assert!(!e.is_dirty());
     }
 }
