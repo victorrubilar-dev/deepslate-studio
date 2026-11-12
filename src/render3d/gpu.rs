@@ -309,7 +309,7 @@ impl Renderer3d {
     }
 
     fn make_target(&self, [w, h]: [u32; 2]) -> Target {
-        let tex = |label, format, samples, usage| {
+        let tex = |label, format, samples, usage, view_formats: &[wgpu::TextureFormat]| {
             self.rs.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
@@ -322,18 +322,22 @@ impl Renderer3d {
                 dimension: wgpu::TextureDimension::D2,
                 format,
                 usage,
-                view_formats: &[],
+                view_formats,
             })
         };
         let attach = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        // egui lee las texturas propias como Rgba8Unorm (bytes en gamma). Se dibuja a través de
+        // una vista sRGB y egui recibe la vista sin conversión; si no, decodifica el sRGB dos
+        // veces y los colores se ven más oscuros.
         let color = tex(
             "3d",
-            FORMAT,
+            wgpu::TextureFormat::Rgba8Unorm,
             1,
             attach | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            &[FORMAT],
         );
-        let msaa = tex("3d-msaa", FORMAT, SAMPLES, attach).create_view(&Default::default());
-        let depth = tex("3d-depth", DEPTH, SAMPLES, attach).create_view(&Default::default());
+        let msaa = tex("3d-msaa", FORMAT, SAMPLES, attach, &[]).create_view(&Default::default());
+        let depth = tex("3d-depth", DEPTH, SAMPLES, attach, &[]).create_view(&Default::default());
         Target {
             size: [w, h],
             color,
@@ -374,7 +378,10 @@ impl Renderer3d {
             })
         };
         let (base_buf, overlay_buf, cape_buf) = (buffer(&base), buffer(&overlay), buffer(&cape));
-        let resolve = target.color.create_view(&Default::default());
+        let resolve = target.color.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(FORMAT),
+            ..Default::default()
+        });
         let mut enc = device.create_command_encoder(&Default::default());
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
