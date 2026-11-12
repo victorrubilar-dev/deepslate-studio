@@ -15,7 +15,7 @@ use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
 use crate::project::{self, Card, Project, ProjectError};
 use crate::render3d::{
-    Camera, FOV_DEG, Hit, PRESETS, Pose, Preset, Renderer3d, Scene, pick, project,
+    Camera, FOV_DEG, Hit, PRESETS, Pose, Preset, Renderer3d, Scene, part_center, pick, project,
 };
 use crate::settings::{Action, NamedColor, Settings, Shortcut, StartView, Theme, View};
 use eframe::egui::{
@@ -71,6 +71,10 @@ enum Dialog {
     ImportImage(Box<ImportState>),
     /// Ruta y nombre de la tarjeta.
     DeleteSkin(PathBuf, String),
+    /// Color a cambiar, color nuevo y si es solo en la parte seleccionada.
+    ReplaceColor(Hsva, Hsva, bool),
+    /// Lado en píxeles y fondo transparente.
+    Render(u32, bool),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -289,6 +293,12 @@ pub struct App {
     clip: Option<(Skin, PartMask)>,
     /// Arrastre con clic izquierdo que empezó fuera del personaje en la vista 3D.
     panning: bool,
+    /// Lado del pincel (1 o 2).
+    brush: u32,
+    /// Último punto de un trazo en 2D, para la línea recta con Shift.
+    line_from: Option<(u32, u32)>,
+    /// Escala de la interfaz ya aplicada a egui.
+    applied_scale: f32,
     /// Acción que espera una tecla en Ajustes → Atajos.
     binding: Option<Action>,
     bind_msg: String,
@@ -378,6 +388,9 @@ impl App {
             stamp: None,
             clip: None,
             panning: false,
+            brush: 1,
+            line_from: None,
+            applied_scale: 0.0,
             binding: None,
             bind_msg: String::new(),
             new_color_name: String::new(),
@@ -938,6 +951,26 @@ impl App {
             Action::Gradient => self.tool = Tool::Gradient,
             Action::Stamp => self.tool = Tool::Stamp,
             Action::Select => self.tool = Tool::Select,
+            Action::Lighten => self.tool = Tool::Lighten,
+            Action::Darken => self.tool = Tool::Darken,
+            Action::ToggleOverlay => {
+                let shown = PARTS
+                    .iter()
+                    .any(|&p| self.editor.is_visible(p, Layer::Overlay));
+                for p in PARTS {
+                    self.editor.set_visible(p, Layer::Overlay, !shown);
+                }
+            }
+            Action::ViewFront => self.set_camera(self.camera.facing(0.0)),
+            Action::ViewBack => self.set_camera(self.camera.facing(180.0)),
+            Action::ViewSide => self.set_camera(self.camera.facing(90.0)),
+            Action::FocusPart => {
+                if let Some(p) = self.selected {
+                    let mut cam = self.camera;
+                    cam.focus(part_center(p, self.editor.pose(), self.editor.skin().model));
+                    self.set_camera(cam);
+                }
+            }
             Action::ToggleMirror => {
                 self.mirror = if self.mirror == MirrorMode::Off {
                     MirrorMode::All
@@ -964,17 +997,25 @@ impl App {
                 self.editor.selection().is_some()
             }
             Action::PasteParts => self.clip.is_some(),
+            Action::FocusPart => self.selected.is_some(),
             _ => true,
+        }
+    }
+
+    /// Pone la cámara y, si se está en la biblioteca o en 2D, pasa a la vista 3D.
+    fn set_camera(&mut self, cam: Camera) {
+        self.camera = cam;
+        if !matches!(self.settings.view, View::ThreeD | View::Preview) {
+            self.settings.view = View::ThreeD;
+            self.settings_changed = true;
         }
     }
 
     /// Entrada de menú con su atajo a la derecha.
     fn menu_item(&mut self, ui: &mut egui::Ui, action: Action) {
         let name = action_name(&self.i18n, action);
-        let mut button = match action_icon(action) {
-            Some(icon) => style::menu_button(ui, icon, name),
-            None => egui::Button::new(name),
-        };
+        // Sin ícono propio, uno vacío: así todos los textos del menú quedan alineados.
+        let mut button = style::menu_button(ui, action_icon(action).unwrap_or(Icon::Blank), name);
         if let Some(sc) = self.settings.shortcut(action) {
             button = button.shortcut_text(shortcut_label(&self.i18n, &sc));
         }
@@ -1049,6 +1090,34 @@ impl App {
                 {
                     self.import_image();
                 }
+                if ui
+                    .add(style::menu_button(
+                        ui,
+                        Icon::Swap,
+                        self.i18n.tr("edit-replace-color"),
+                    ))
+                    .clicked()
+                {
+                    self.dialog = Some(Dialog::ReplaceColor(
+                        self.color,
+                        self.color2,
+                        self.selected.is_some(),
+                    ));
+                }
+                if ui
+                    .add(style::menu_button(
+                        ui,
+                        Icon::Noise,
+                        self.i18n.tr("edit-vary"),
+                    ))
+                    .on_hover_text(self.i18n.tr("edit-vary-hint"))
+                    .clicked()
+                {
+                    // Con selección, la selección; si no, la parte elegida o toda la skin.
+                    let part = self.selected.filter(|_| self.editor.selection().is_none());
+                    let seed = ui.input(|i| i.time).to_bits();
+                    self.editor.vary(part, 10, seed);
+                }
                 ui.menu_button(self.i18n.tr("edit-apply-template"), |ui| {
                     ui.weak(self.i18n.tr("template-color-note"));
                     for (t, name) in [
@@ -1064,6 +1133,26 @@ impl App {
                         }
                     }
                 });
+            });
+            ui.menu_button(self.i18n.tr("menu-view"), |ui| {
+                self.menu_item(ui, Action::ToggleOverlay);
+                ui.separator();
+                for a in [
+                    Action::ViewFront,
+                    Action::ViewBack,
+                    Action::ViewSide,
+                    Action::FocusPart,
+                ] {
+                    self.menu_item(ui, a);
+                }
+                ui.separator();
+                let label = self.i18n.tr("view-split");
+                if ui
+                    .add(egui::Checkbox::new(&mut self.settings.split_view, label))
+                    .changed()
+                {
+                    self.settings_changed = true;
+                }
             });
             let settings = style::menu_button(ui, Icon::Settings, self.i18n.tr("menu-settings"))
                 .frame_when_inactive(false);
@@ -1158,6 +1247,8 @@ impl App {
                 (Tool::Gradient, Action::Gradient),
                 (Tool::Stamp, Action::Stamp),
                 (Tool::Select, Action::Select),
+                (Tool::Lighten, Action::Lighten),
+                (Tool::Darken, Action::Darken),
             ] {
                 let name = action_name(i, action);
                 let tip = match self.settings.shortcut(action) {
@@ -1178,6 +1269,14 @@ impl App {
             }
         });
         ui.label(egui::RichText::new(current).font(style::pixel_font(style::SIZE_UI)));
+        ui.horizontal(|ui| {
+            ui.label(i.tr("brush-size"));
+            ui.selectable_value(&mut self.brush, 1, "1×1");
+            ui.selectable_value(&mut self.brush, 2, "2×2");
+        })
+        .response
+        .on_hover_text(i.tr("brush-hint"));
+        ui.weak(i.tr("line-hint"));
         ui.horizontal_wrapped(|ui| {
             ui.add(icons::image(ui.ctx(), Icon::Mirror).tint(ui.visuals().text_color()));
             ui.label(i.tr("mirror"));
@@ -1484,7 +1583,7 @@ impl App {
                     .add(style::menu_button(ui, Icon::Camera, i.tr("capture")))
                     .clicked()
                 {
-                    self.capture();
+                    self.dialog = Some(Dialog::Render(1024, true));
                 }
             }
         });
@@ -1502,7 +1601,22 @@ impl App {
         ui.separator();
         match self.settings.view {
             View::Library => self.library(ui),
-            View::Flat => self.canvas(ui),
+            View::Flat => self.canvas(ui, self.settings.pixel_size),
+            View::ThreeD if self.settings.split_view => {
+                // 3D a la izquierda; a la derecha, el lienzo 2D del tamaño que entre.
+                let avail = ui.available_size();
+                let left = Vec2::new((avail.x * 0.62).floor(), avail.y);
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui(left, |ui| self.view3d(ui, false));
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        let px = ((ui.available_width() - 16.0) / 64.0)
+                            .floor()
+                            .clamp(2.0, self.settings.pixel_size);
+                        self.canvas(ui, px);
+                    });
+                });
+            }
             View::ThreeD => self.view3d(ui, false),
             View::Preview => self.view3d(ui, true),
         }
@@ -1864,7 +1978,7 @@ impl App {
         }
         self.sync_mirror();
         match self.tool {
-            Tool::Pencil | Tool::Eraser => {
+            Tool::Pencil | Tool::Eraser | Tool::Lighten | Tool::Darken => {
                 let down =
                     resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
                 if down && !self.painting {
@@ -1885,11 +1999,6 @@ impl App {
                 if !self.painting {
                     return hover;
                 }
-                let color = if self.tool == Tool::Eraser {
-                    ERASE
-                } else {
-                    self.primary()
-                };
                 let Some(pos) = resp.interact_pointer_pos() else {
                     return hover;
                 };
@@ -1904,7 +2013,7 @@ impl App {
                             .last_hit
                             .filter(|l| (l.part, l.layer, l.face) == (h.part, h.layer, h.face))
                             .map_or((h.x, h.y), |l| (l.x, l.y));
-                        self.editor.paint_line(start, (h.x, h.y), color);
+                        self.stroke_segment(start, (h.x, h.y));
                     }
                     self.last_hit = hit;
                 }
@@ -1928,7 +2037,8 @@ impl App {
         hover
     }
 
-    fn capture(&mut self) {
+    /// Guarda la vista 3D en PNG, de `size` píxeles de lado. Con `bg`, sobre ese color.
+    fn capture(&mut self, size: u32, bg: Option<Color32>) {
         if self.renderer.is_none() {
             return;
         }
@@ -1950,9 +2060,21 @@ impl App {
             lighting: self.settings.lighting,
         };
         let renderer = self.renderer.as_ref().expect("comprobado arriba");
-        let Some(img) = renderer.capture(1024, &scene) else {
+        let Some(mut img) = renderer.capture(size, &scene) else {
             return self.error(self.i18n.tr("error-capture"));
         };
+        if let Some(bg) = bg {
+            for px in img.pixels_mut() {
+                let a = px[3] as f32 / 255.0;
+                let mix = |c: u8, b: u8| (c as f32 * a + b as f32 * (1.0 - a)).round() as u8;
+                *px = Rgba([
+                    mix(px[0], bg.r()),
+                    mix(px[1], bg.g()),
+                    mix(px[2], bg.b()),
+                    255,
+                ]);
+            }
+        }
         let result = img
             .save_with_format(&path, image::ImageFormat::Png)
             .map_err(|e| e.to_string());
@@ -1966,9 +2088,9 @@ impl App {
         }
     }
 
-    fn canvas(&mut self, ui: &mut egui::Ui) {
+    /// Lienzo 2D con píxeles de `px` puntos.
+    fn canvas(&mut self, ui: &mut egui::Ui, px: f32) {
         self.update_texture(ui.ctx());
-        let px = self.settings.pixel_size;
         egui::ScrollArea::both().show(ui, |ui| {
             let (area, resp) =
                 ui.allocate_exact_size(Vec2::splat(64.0 * px), Sense::click_and_drag());
@@ -2123,11 +2245,22 @@ impl App {
     }
 
     fn sync_mirror(&mut self) {
+        self.editor.set_brush(self.brush);
         self.editor.set_mirror(match self.mirror {
             MirrorMode::Off => Mirror::Off,
             MirrorMode::All => Mirror::All,
             MirrorMode::Selected => self.selected.map_or(Mirror::Off, Mirror::Part),
         });
+    }
+
+    /// Un tramo del trazo en curso con la herramienta activa.
+    fn stroke_segment(&mut self, from: (u32, u32), to: (u32, u32)) {
+        match self.tool {
+            Tool::Lighten => self.editor.shade_line(from, to, true),
+            Tool::Darken => self.editor.shade_line(from, to, false),
+            Tool::Eraser => self.editor.paint_line(from, to, ERASE),
+            _ => self.editor.paint_line(from, to, self.primary()),
+        }
     }
 
     fn handle_canvas_input(
@@ -2138,13 +2271,15 @@ impl App {
     ) {
         self.sync_mirror();
         match self.tool {
-            Tool::Pencil | Tool::Eraser => {
+            Tool::Pencil | Tool::Eraser | Tool::Lighten | Tool::Darken => {
                 let down = resp.is_pointer_button_down_on()
                     && resp.ctx.input(|i| i.pointer.primary_down());
                 if down && !self.painting {
                     self.editor.begin_stroke();
                     self.painting = true;
-                    self.last_px = None;
+                    // Con Shift, el trazo empieza con una recta desde el último punto pintado.
+                    let shift = resp.ctx.input(|i| i.modifiers.shift);
+                    self.last_px = self.line_from.filter(|_| shift);
                     if self.tool == Tool::Pencil {
                         self.remember(self.primary());
                     }
@@ -2155,15 +2290,11 @@ impl App {
                 if !down {
                     self.editor.end_stroke();
                     self.painting = false;
+                    self.line_from = self.last_px;
                     return;
                 }
-                let color = if self.tool == Tool::Eraser {
-                    ERASE
-                } else {
-                    self.primary()
-                };
                 if let Some(p) = at {
-                    self.editor.paint_line(self.last_px.unwrap_or(p), p, color);
+                    self.stroke_segment(self.last_px.unwrap_or(p), p);
                 }
                 self.last_px = at;
             }
@@ -2387,6 +2518,52 @@ impl App {
                     ],
                 )
             }
+            Dialog::ReplaceColor(from, to, part_only) => {
+                ui.heading(i.tr("replace-title"));
+                egui::Grid::new("replace").num_columns(2).show(ui, |ui| {
+                    ui.label(i.tr("replace-from"));
+                    color_picker::color_edit_button_hsva(ui, from, color_picker::Alpha::OnlyBlend);
+                    ui.end_row();
+                    ui.label(i.tr("replace-to"));
+                    color_picker::color_edit_button_hsva(ui, to, color_picker::Alpha::OnlyBlend);
+                    ui.end_row();
+                });
+                ui.radio_value(part_only, false, i.tr("replace-scope-all"));
+                if let Some(p) = self.selected {
+                    let part = part_name(i, p);
+                    ui.radio_value(
+                        part_only,
+                        true,
+                        i.tr_args("replace-scope-part", &[("part", part.into())]),
+                    );
+                } else {
+                    *part_only = false;
+                }
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("replace-apply")),
+                        (Choice::Cancel, i.tr("cancel")),
+                    ],
+                )
+            }
+            Dialog::Render(size, transparent) => {
+                ui.heading(i.tr("render-title"));
+                ui.horizontal(|ui| {
+                    ui.label(i.tr("render-size"));
+                    for s in [512, 1024, 2048] {
+                        ui.selectable_value(size, s, format!("{s}×{s}"));
+                    }
+                });
+                ui.checkbox(transparent, i.tr("render-transparent"));
+                buttons(
+                    ui,
+                    &[
+                        (Choice::Accept, i.tr("render-export")),
+                        (Choice::Cancel, i.tr("cancel")),
+                    ],
+                )
+            }
             Dialog::DeleteSkin(_, name) => {
                 ui.label(library_view::delete_question(i, name));
                 buttons(
@@ -2436,6 +2613,21 @@ impl App {
             }
             (Dialog::EditCard(path, draft), Choice::Accept) => self.save_card_draft(&path, &draft),
             (Dialog::DeleteSkin(path, _), Choice::Accept) => self.delete_skin(&path),
+            (Dialog::ReplaceColor(from, to, part_only), Choice::Accept) => {
+                let part = self.selected.filter(|_| part_only);
+                self.editor.replace_color(
+                    Rgba(from.to_srgba_unmultiplied()),
+                    Rgba(to.to_srgba_unmultiplied()),
+                    part,
+                );
+            }
+            (Dialog::Render(size, transparent), Choice::Accept) => {
+                let bg = self.settings.background_3d.map_or_else(
+                    || ctx.global_style().visuals.panel_fill,
+                    |[r, g, b]| Color32::from_rgb(r, g, b),
+                );
+                self.capture(size, (!transparent).then_some(bg));
+            }
             (Dialog::ImportImage(st), Choice::Accept) => {
                 let model = self.editor.skin().model;
                 let canvas = fit(&st.src, st.crop, model, st.fit);
@@ -2455,6 +2647,11 @@ impl eframe::App for App {
             self.i18n = I18n::new(lang);
         }
         style::set_motion(&ctx, self.settings.reduce_motion);
+        let scale = self.settings.ui_scale.clamp(0.75, 2.0);
+        if scale != self.applied_scale {
+            ctx.set_zoom_factor(scale);
+            self.applied_scale = scale;
+        }
         self.handle_close(&ctx);
         self.handle_drops(&ctx);
         self.shortcuts(&ctx);
@@ -2575,6 +2772,13 @@ fn action_name(i: &I18n, a: Action) -> String {
         Action::CloseTab => i.tr("tab-close"),
         Action::NextTab => i.tr("tab-next"),
         Action::PrevTab => i.tr("tab-prev"),
+        Action::Lighten => i.tr("tool-lighten"),
+        Action::Darken => i.tr("tool-darken"),
+        Action::ToggleOverlay => i.tr("action-toggle-overlay"),
+        Action::ViewFront => i.tr("view-front"),
+        Action::ViewBack => i.tr("view-back"),
+        Action::ViewSide => i.tr("view-side"),
+        Action::FocusPart => i.tr("view-focus-part"),
     }
 }
 
@@ -2598,6 +2802,11 @@ fn action_icon(a: Action) -> Option<Icon> {
         Action::ToggleMirror => Icon::Mirror,
         Action::SwapColors => Icon::Swap,
         Action::ToggleView => Icon::Cube,
+        Action::Lighten => Icon::Sun,
+        Action::Darken => Icon::Moon,
+        Action::ToggleOverlay => Icon::Library,
+        Action::ViewFront | Action::ViewBack | Action::ViewSide => Icon::Cube,
+        Action::FocusPart => Icon::Search,
         Action::CopyParts | Action::PasteParts | Action::NextTab | Action::PrevTab => {
             return None;
         }

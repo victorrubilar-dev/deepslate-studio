@@ -61,9 +61,16 @@ pub enum Action {
     CloseTab,
     NextTab,
     PrevTab,
+    Lighten,
+    Darken,
+    ToggleOverlay,
+    ViewFront,
+    ViewBack,
+    ViewSide,
+    FocusPart,
 }
 
-pub const ACTIONS: [Action; 26] = [
+pub const ACTIONS: [Action; 33] = [
     Action::New,
     Action::Open,
     Action::CloseTab,
@@ -87,9 +94,16 @@ pub const ACTIONS: [Action; 26] = [
     Action::Gradient,
     Action::Stamp,
     Action::Select,
+    Action::Lighten,
+    Action::Darken,
     Action::ToggleMirror,
     Action::SwapColors,
     Action::ToggleView,
+    Action::ToggleOverlay,
+    Action::ViewFront,
+    Action::ViewBack,
+    Action::ViewSide,
+    Action::FocusPart,
 ];
 
 /// Combinación de teclas. `ctrl` es Cmd en macOS. `key` es el nombre de la tecla en egui.
@@ -144,6 +158,13 @@ impl Action {
             Action::ToggleMirror => (false, false, "X"),
             Action::SwapColors => (false, false, "W"),
             Action::ToggleView => (false, false, "V"),
+            Action::Lighten => (false, false, "L"),
+            Action::Darken => (false, false, "O"),
+            Action::ToggleOverlay => (false, false, "H"),
+            Action::ViewFront => (false, false, "1"),
+            Action::ViewBack => (false, false, "2"),
+            Action::ViewSide => (false, false, "3"),
+            Action::FocusPart => (false, false, "4"),
         };
         Some(Shortcut::new(ctrl, shift, key))
     }
@@ -183,6 +204,10 @@ pub struct Settings {
     pub start_tool: Tool,
     /// Transiciones de la interfaz instantáneas.
     pub reduce_motion: bool,
+    /// Tamaño de toda la interfaz (1.0 = normal).
+    pub ui_scale: f32,
+    /// En la vista 3D, el lienzo 2D al lado.
+    pub split_view: bool,
 
     /// Fondo de la vista 3D; `None` deja el del panel. La captura siempre es transparente.
     pub background_3d: Option<[u8; 3]>,
@@ -222,6 +247,8 @@ impl Default for Settings {
             autosave_minutes: 5,
             start_tool: Tool::Pencil,
             reduce_motion: false,
+            ui_scale: 1.0,
+            split_view: false,
             background_3d: None,
             lighting: 1.0,
             rotate_speed: 1.0,

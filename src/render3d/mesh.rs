@@ -40,6 +40,30 @@ impl Default for Camera {
 }
 
 impl Camera {
+    /// Mira de frente (0°), de espalda (180°) o de lado (90°), sin cambiar acercamiento
+    /// ni desplazamiento.
+    pub fn facing(self, yaw: f32) -> Self {
+        Self {
+            yaw,
+            pitch: 0.0,
+            ..self
+        }
+    }
+
+    /// Centra la pantalla en `p` (espacio del modelo) y se acerca.
+    pub fn focus(&mut self, p: V3) {
+        let v = apply(
+            view_xf(&Self {
+                pan: [0.0; 2],
+                ..*self
+            })
+            .r,
+            sub(p, CENTER),
+        );
+        self.pan = [-v[0], -v[1]];
+        self.distance = 30.0;
+    }
+
     /// Encuadre de las miniaturas de la biblioteca: el cuerpo entero, de tres cuartos.
     pub fn thumbnail() -> Self {
         Self {
@@ -161,6 +185,12 @@ fn angles(pose: &Pose, part: Part) -> [f32; 3] {
         Part::RightLeg => pose.right_leg,
         Part::LeftLeg => pose.left_leg,
     }
+}
+
+/// Centro de una parte en la pose dada, en espacio del modelo.
+pub fn part_center(part: Part, pose: &Pose, model: Model) -> V3 {
+    let (min, max, _) = part_box(part, model);
+    part_xf(part, pose, model).point([0, 1, 2].map(|i| (min[i] + max[i]) / 2.0))
 }
 
 /// Cabeza y brazos cuelgan del torso; las piernas son independientes.
@@ -668,5 +698,15 @@ mod tests {
             (p[0], p[1]),
         );
         assert_eq!(hit.map(|h| h.part), Some(Part::Head));
+    }
+
+    #[test]
+    fn focus_centers_the_part() {
+        let mut cam = Camera::default();
+        let pose = Preset::Waving.pose();
+        let c = part_center(Part::RightArm, &pose, Model::Alex);
+        cam.focus(c);
+        let p = project(&cam, 1.0, c).unwrap();
+        assert!(p[0].abs() < 1e-4 && p[1].abs() < 1e-4, "{p:?}");
     }
 }
