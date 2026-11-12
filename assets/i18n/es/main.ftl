@@ -176,6 +176,7 @@ lang-ca = Català
 settings-start-view = Vista al iniciar
 start-view-last = La última usada
 settings-open-last = Abrir la última skin al iniciar
+settings-reduce-motion = Reducir animaciones
 settings-autosave = Autoguardado
 settings-autosave-hint = Solo guarda proyectos que ya tienen archivo.
 unit-minutes = { " " }min

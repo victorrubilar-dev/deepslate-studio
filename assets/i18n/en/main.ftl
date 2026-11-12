@@ -175,6 +175,7 @@ lang-ca = Català
 settings-start-view = View on startup
 start-view-last = Last used
 settings-open-last = Open the last skin on startup
+settings-reduce-motion = Reduce animations
 settings-autosave = Autosave
 settings-autosave-hint = Only saves projects that already have a file.
 unit-minutes = { " " }min

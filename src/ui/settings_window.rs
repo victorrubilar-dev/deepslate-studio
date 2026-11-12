@@ -204,6 +204,9 @@ fn general(ui: &mut egui::Ui, i: &I18n, s: &mut Settings) {
         row(ui, i.tr("settings-open-last"), |ui| {
             ui.checkbox(&mut s.open_last, "");
         });
+        row(ui, i.tr("settings-reduce-motion"), |ui| {
+            ui.checkbox(&mut s.reduce_motion, "");
+        });
     });
 }
 

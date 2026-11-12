@@ -181,6 +181,8 @@ pub struct Settings {
     pub autosave: bool,
     pub autosave_minutes: u32,
     pub start_tool: Tool,
+    /// Transiciones de la interfaz instantáneas.
+    pub reduce_motion: bool,
 
     /// Fondo de la vista 3D; `None` deja el del panel. La captura siempre es transparente.
     pub background_3d: Option<[u8; 3]>,
@@ -219,6 +221,7 @@ impl Default for Settings {
             autosave: false,
             autosave_minutes: 5,
             start_tool: Tool::Pencil,
+            reduce_motion: false,
             background_3d: None,
             lighting: 1.0,
             rotate_speed: 1.0,

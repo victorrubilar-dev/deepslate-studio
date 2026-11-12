@@ -1,5 +1,6 @@
 //! Ventana principal: menús, panel de herramientas, lienzo 2D y diálogos.
 
+mod icons;
 mod library_view;
 mod settings_window;
 mod style;
@@ -19,6 +20,7 @@ use eframe::egui::{
     self, Color32, ColorImage, Key, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind,
     TextureHandle, TextureOptions, Vec2, color_picker, ecolor::Hsva,
 };
+use icons::Icon;
 use image::{Rgba, RgbaImage};
 use std::path::{Path, PathBuf};
 use style::ACCENT;
@@ -517,6 +519,7 @@ impl App {
         let mut switch = None;
         let mut close = None;
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
             for i in 0..self.tabs.len() {
                 let name = self
                     .tab_path(i)
@@ -526,24 +529,31 @@ impl App {
                 } else {
                     name
                 };
-                let tab = ui.selectable_label(i == self.active, label);
+                let tab = style::tab(ui, None, &label, i == self.active);
+                if i == self.active {
+                    style::slide_marker(ui, egui::Id::unique("tab-marker"), tab.rect);
+                }
                 if tab.clicked() {
                     switch = Some(i);
                 }
                 if tab.middle_clicked() {
                     close = Some(i);
                 }
-                if ui
-                    .small_button("×")
-                    .on_hover_text(self.i18n.tr("tab-close"))
-                    .clicked()
-                {
+                let x = egui::Button::image(
+                    icons::image(ctx, Icon::Close).fit_to_exact_size(Vec2::splat(12.0)),
+                )
+                .image_tint_follows_text_color(true)
+                .frame_when_inactive(false);
+                if ui.add(x).on_hover_text(self.i18n.tr("tab-close")).clicked() {
                     close = Some(i);
                 }
-                ui.separator();
+                ui.add_space(10.0);
             }
+            let plus = egui::Button::image(icons::image(ctx, Icon::Plus))
+                .image_tint_follows_text_color(true)
+                .frame_when_inactive(false);
             if ui
-                .small_button("+")
+                .add(plus)
                 .on_hover_text(self.i18n.tr("file-new"))
                 .clicked()
             {
@@ -624,16 +634,23 @@ impl App {
             (!i.raw.hovered_files.is_empty(), paths)
         });
         let library = self.settings.view == View::Library;
-        if hovering {
+        let shown = ctx.animate_bool_with_time(
+            egui::Id::unique("drop-fade"),
+            hovering,
+            ctx.global_style().animation_time,
+        );
+        if shown > 0.0 {
             let key = if library { "drop-library" } else { "drop-open" };
             let rect = ctx.content_rect();
-            let painter = ctx.layer_painter(egui::LayerId::new(
+            let mut painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::unique("drop"),
             ));
+            painter.multiply_opacity(shown);
             painter.rect_filled(rect, 0.0, Color32::from_black_alpha(170));
+            // El marco se acerca desde afuera mientras aparece.
             painter.rect_stroke(
-                rect.shrink(12.0),
+                rect.shrink(12.0 + 12.0 * (1.0 - shown)),
                 0.0,
                 Stroke::new(3.0, ACCENT),
                 StrokeKind::Inside,
@@ -642,7 +659,7 @@ impl App {
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 self.i18n.tr(key),
-                style::pixel_font(32.0),
+                style::pixel_font(style::SIZE_HERO),
                 Color32::WHITE,
             );
         }
@@ -945,7 +962,11 @@ impl App {
 
     /// Entrada de menú con su atajo a la derecha.
     fn menu_item(&mut self, ui: &mut egui::Ui, action: Action) {
-        let mut button = egui::Button::new(action_name(&self.i18n, action));
+        let name = action_name(&self.i18n, action);
+        let mut button = match action_icon(action) {
+            Some(icon) => style::menu_button(ui, icon, name),
+            None => egui::Button::new(name),
+        };
         if let Some(sc) = self.settings.shortcut(action) {
             button = button.shortcut_text(shortcut_label(&self.i18n, &sc));
         }
@@ -971,7 +992,14 @@ impl App {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button(self.i18n.tr("menu-file"), |ui| {
                 self.menu_item(ui, Action::New);
-                if ui.button(self.i18n.tr("file-new-base")).clicked() {
+                if ui
+                    .add(style::menu_button(
+                        ui,
+                        Icon::New,
+                        self.i18n.tr("file-new-base"),
+                    ))
+                    .clicked()
+                {
                     let skin = Skin {
                         pixels: templates::draw(Template::Base, Model::Steve, self.primary()),
                         model: Model::Steve,
@@ -1003,7 +1031,14 @@ impl App {
                 self.menu_item(ui, Action::CopyParts);
                 self.menu_item(ui, Action::PasteParts);
                 ui.separator();
-                if ui.button(self.i18n.tr("edit-image-front")).clicked() {
+                if ui
+                    .add(style::menu_button(
+                        ui,
+                        Icon::Open,
+                        self.i18n.tr("edit-image-front"),
+                    ))
+                    .clicked()
+                {
                     self.import_image();
                 }
                 ui.menu_button(self.i18n.tr("edit-apply-template"), |ui| {
@@ -1022,7 +1057,9 @@ impl App {
                     }
                 });
             });
-            if ui.button(self.i18n.tr("menu-settings")).clicked() {
+            let settings = style::menu_button(ui, Icon::Settings, self.i18n.tr("menu-settings"))
+                .frame_when_inactive(false);
+            if ui.add(settings).clicked() {
                 self.show_settings = true;
             }
         });
@@ -1038,7 +1075,20 @@ impl App {
             let mark = if self.editor.is_dirty() { " •" } else { "" };
             ui.label(format!("{name}{mark}"));
             ui.separator();
-            ui.label(&self.status);
+            let id = egui::Id::unique("status-since");
+            let now = ui.input(|i| i.time);
+            let (text, since) = ui
+                .data(|d| d.get_temp::<(String, f64)>(id))
+                .unwrap_or_default();
+            let since = if text == self.status {
+                since
+            } else {
+                ui.data_mut(|d| d.insert_temp(id, (self.status.clone(), now)));
+                now
+            };
+            let t = style::appear(ui, since, 0.0, 1.2);
+            let color = ACCENT.lerp_to_gamma(ui.visuals().text_color(), t);
+            ui.label(egui::RichText::new(&self.status).color(color));
         });
     }
 
@@ -1059,7 +1109,7 @@ impl App {
     /// Ajuste fino de la articulación de la parte seleccionada.
     fn side_joint(&mut self, ui: &mut egui::Ui) {
         let i = &self.i18n;
-        ui.heading(i.tr("joint-title"));
+        style::section(ui, Icon::Cube, &i.tr("joint-title"));
         let Some(part) = self.selected else {
             ui.weak(i.tr("joint-hint"));
             return;
@@ -1088,8 +1138,10 @@ impl App {
 
     fn side_tools(&mut self, ui: &mut egui::Ui) {
         let i = &self.i18n;
-        ui.heading(i.tr("tools"));
+        style::section(ui, Icon::Pencil, &i.tr("tools"));
+        let mut current = String::new();
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::splat(4.0);
             for (tool, action) in [
                 (Tool::Pencil, Action::Pencil),
                 (Tool::Eraser, Action::Eraser),
@@ -1099,16 +1151,27 @@ impl App {
                 (Tool::Stamp, Action::Stamp),
                 (Tool::Select, Action::Select),
             ] {
-                let mut resp = ui.selectable_value(&mut self.tool, tool, action_name(i, action));
-                if let Some(sc) = self.settings.shortcut(action) {
-                    resp = resp.on_hover_text(shortcut_label(i, &sc));
+                let name = action_name(i, action);
+                let tip = match self.settings.shortcut(action) {
+                    Some(sc) => format!("{name} ({})", shortcut_label(i, &sc)),
+                    None => name.clone(),
+                };
+                let icon = action_icon(action).unwrap_or(Icon::Pencil);
+                let resp = style::icon_button(ui, icon, self.tool == tool, &tip);
+                if resp.clicked() {
+                    self.tool = tool;
                 }
                 if tool == Tool::Stamp && self.stamp.is_none() {
                     resp.on_hover_text(i.tr("stamp-empty"));
                 }
+                if self.tool == tool {
+                    current = name;
+                }
             }
         });
+        ui.label(egui::RichText::new(current).font(style::pixel_font(style::SIZE_UI)));
         ui.horizontal_wrapped(|ui| {
+            ui.add(icons::image(ui.ctx(), Icon::Mirror).tint(ui.visuals().text_color()));
             ui.label(i.tr("mirror"));
             ui.selectable_value(&mut self.mirror, MirrorMode::Off, i.tr("mirror-off"));
             ui.selectable_value(&mut self.mirror, MirrorMode::All, i.tr("mirror-all"));
@@ -1121,7 +1184,7 @@ impl App {
 
     fn side_colors(&mut self, ui: &mut egui::Ui) {
         let i = &self.i18n;
-        ui.heading(i.tr("color"));
+        style::section(ui, Icon::Fill, &i.tr("color"));
         ui.horizontal(|ui| {
             color_picker::color_edit_button_hsva(
                 ui,
@@ -1151,7 +1214,14 @@ impl App {
                 color_picker::Alpha::OnlyBlend,
             )
             .on_hover_text(i.tr("color-secondary"));
-            if ui.button(action_name(i, Action::SwapColors)).clicked() {
+            if ui
+                .add(style::menu_button(
+                    ui,
+                    Icon::Swap,
+                    action_name(i, Action::SwapColors),
+                ))
+                .clicked()
+            {
                 std::mem::swap(&mut self.color, &mut self.color2);
             }
         });
@@ -1271,7 +1341,7 @@ impl App {
         }
         ui.separator();
 
-        ui.heading(i.tr("layers"));
+        style::section(ui, Icon::Library, &i.tr("layers"));
         let layer_names = [i.tr("layer-base"), i.tr("layer-overlay")];
         egui::Grid::new("visibility").show(ui, |ui| {
             ui.label("");
@@ -1332,11 +1402,24 @@ impl App {
         let view3d = matches!(before, View::ThreeD | View::Preview);
         ui.horizontal_wrapped(|ui| {
             let i = &self.i18n;
-            ui.selectable_value(&mut self.settings.view, View::Library, i.tr("view-library"));
-            ui.separator();
-            ui.selectable_value(&mut self.settings.view, View::Flat, i.tr("view-2d"));
-            ui.selectable_value(&mut self.settings.view, View::ThreeD, i.tr("view-3d"));
-            ui.selectable_value(&mut self.settings.view, View::Preview, i.tr("view-preview"));
+            for (view, icon, key) in [
+                (View::Library, Icon::Library, "view-library"),
+                (View::Flat, Icon::Flat, "view-2d"),
+                (View::ThreeD, Icon::Cube, "view-3d"),
+                (View::Preview, Icon::Preview, "view-preview"),
+            ] {
+                let on = self.settings.view == view;
+                let resp = style::tab(ui, Some(icon), &i.tr(key), on);
+                if on {
+                    style::slide_marker(ui, egui::Id::unique("view-marker"), resp.rect);
+                }
+                if resp.clicked() {
+                    self.settings.view = view;
+                }
+                if view == View::Library {
+                    ui.separator();
+                }
+            }
             if view3d {
                 ui.separator();
                 ui.label(i.tr("pose"));
@@ -1355,7 +1438,10 @@ impl App {
                 if let Some(p) = chosen {
                     self.editor.set_pose(p.pose());
                 }
-                ui.toggle_value(&mut self.anim.playing, i.tr("anim-play"));
+                ui.toggle_value(
+                    &mut self.anim.playing,
+                    (icons::image(ui.ctx(), Icon::Play), i.tr("anim-play")),
+                );
                 if self.anim.playing {
                     let shown = self
                         .anim
@@ -1379,10 +1465,16 @@ impl App {
                         egui::Slider::new(&mut self.anim.speed, 0.2..=3.0).text(i.tr("anim-speed")),
                     );
                 }
-                if ui.button(i.tr("view-reset")).clicked() {
+                if ui
+                    .add(style::menu_button(ui, Icon::Reset, i.tr("view-reset")))
+                    .clicked()
+                {
                     self.camera = Camera::default();
                 }
-                if ui.button(i.tr("capture")).clicked() {
+                if ui
+                    .add(style::menu_button(ui, Icon::Camera, i.tr("capture")))
+                    .clicked()
+                {
                     self.capture();
                 }
             }
@@ -1395,6 +1487,7 @@ impl App {
             // Al entrar a la biblioteca se vuelve a leer la carpeta: puede haber cambiado afuera.
             if self.settings.view == View::Library {
                 self.lib.stale = true;
+                self.lib.shown_at = ui.input(|i| i.time);
             }
         }
         ui.separator();
@@ -2283,6 +2376,7 @@ impl eframe::App for App {
         if lang != self.i18n.lang() {
             self.i18n = I18n::new(lang);
         }
+        style::set_motion(&ctx, self.settings.reduce_motion);
         self.handle_close(&ctx);
         self.handle_drops(&ctx);
         self.shortcuts(&ctx);
@@ -2402,6 +2496,32 @@ fn action_name(i: &I18n, a: Action) -> String {
         Action::NextTab => i.tr("tab-next"),
         Action::PrevTab => i.tr("tab-prev"),
     }
+}
+
+fn action_icon(a: Action) -> Option<Icon> {
+    Some(match a {
+        Action::New => Icon::New,
+        Action::Open => Icon::Open,
+        Action::Save | Action::SaveAs => Icon::Save,
+        Action::Export | Action::QuickExport => Icon::Export,
+        Action::Undo => Icon::Undo,
+        Action::Redo => Icon::Redo,
+        Action::CopySelection => Icon::Select,
+        Action::EraseSelection | Action::Eraser => Icon::Eraser,
+        Action::Deselect | Action::CloseTab => Icon::Close,
+        Action::Pencil => Icon::Pencil,
+        Action::Fill => Icon::Fill,
+        Action::Picker => Icon::Picker,
+        Action::Gradient => Icon::Gradient,
+        Action::Stamp => Icon::Stamp,
+        Action::Select => Icon::Select,
+        Action::ToggleMirror => Icon::Mirror,
+        Action::SwapColors => Icon::Swap,
+        Action::ToggleView => Icon::Cube,
+        Action::CopyParts | Action::PasteParts | Action::NextTab | Action::PrevTab => {
+            return None;
+        }
+    })
 }
 
 fn part_name(i: &I18n, p: Part) -> String {

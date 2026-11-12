@@ -175,6 +175,7 @@ lang-ca = Català
 settings-start-view = Vista en iniciar
 start-view-last = L'última feta servir
 settings-open-last = Obre l'última skin en iniciar
+settings-reduce-motion = Redueix les animacions
 settings-autosave = Desament automàtic
 settings-autosave-hint = Només desa projectes que ja tenen fitxer.
 unit-minutes = { " " }min
