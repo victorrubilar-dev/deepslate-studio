@@ -23,3 +23,6 @@ unic-langid = "0.9"
 [profile.release]
 strip = true
 lto = "thin"
+
+[target."cfg(windows)".build-dependencies]
+winresource = "0.1.34"

@@ -35,6 +35,7 @@ La CI (`.github/workflows/ci.yml`) ejecuta `fmt`, `clippy` y `test` en Linux y e
 | Diálogos de archivo | `rfd` |
 | Rutas de datos | `directories` |
 | Registro | `log` |
+| Ícono del `.exe` (solo al compilar para Windows) | `winresource`, con `build.rs` y `assets/icon.ico` |
 
 Rust estable, edición 2024, versión mínima 1.95.
 
