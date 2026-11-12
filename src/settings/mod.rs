@@ -151,6 +151,7 @@ pub struct Settings {
     pub theme: Theme,
     pub pixel_size: f32,
     pub show_grid: bool,
+    pub show_labels: bool,
     pub undo_levels: usize,
     /// Última vista usada (2D o 3D).
     pub view: View,
@@ -188,6 +189,7 @@ impl Default for Settings {
             theme: Theme::Dark,
             pixel_size: 10.0,
             show_grid: true,
+            show_labels: true,
             undo_levels: 100,
             view: View::Flat,
             shortcuts: BTreeMap::new(),

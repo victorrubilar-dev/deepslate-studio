@@ -2,7 +2,9 @@
 
 mod settings_window;
 
-use crate::core::{FACES, LAYERS, Layer, LoadError, Model, PARTS, Part, Skin, convert_model, rect};
+use crate::core::{
+    FACES, Face, LAYERS, Layer, LoadError, Model, PARTS, Part, Skin, convert_model, rect,
+};
 use crate::editor::colors::{palette_from, parse_hex, to_hex};
 use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
@@ -1161,6 +1163,31 @@ impl App {
             let outline = Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color);
             for r in &visible_faces {
                 painter.rect_stroke(*r, 0.0, outline, StrokeKind::Inside);
+            }
+            if self.settings.show_labels && px >= 6.0 {
+                // Cada parte tiene un rincón sin uso arriba a la izquierda: ahí va su nombre.
+                let font = egui::FontId::proportional((px * 1.1).clamp(9.0, 13.0));
+                for part in PARTS {
+                    for layer in LAYERS
+                        .into_iter()
+                        .filter(|&l| self.editor.is_visible(part, l))
+                    {
+                        let x = rect(part, layer, Face::Right, model).x;
+                        let y = rect(part, layer, Face::Top, model).y;
+                        let pos = area.min + Vec2::new(x as f32, y as f32) * px + Vec2::splat(2.0);
+                        let name = part_name(&self.i18n, part);
+                        let text = match layer {
+                            Layer::Base => name,
+                            Layer::Overlay => self
+                                .i18n
+                                .tr_args("part-label-overlay", &[("part", name.into())]),
+                        };
+                        let galley = painter.layout_no_wrap(text, font.clone(), v.text_color());
+                        let bg = Rect::from_min_size(pos, galley.size()).expand(1.0);
+                        painter.rect_filled(bg, 2.0, v.extreme_bg_color.gamma_multiply(0.6));
+                        painter.galley(pos, galley, v.text_color());
+                    }
+                }
             }
             if let Some(part) = self.selected {
                 for layer in LAYERS

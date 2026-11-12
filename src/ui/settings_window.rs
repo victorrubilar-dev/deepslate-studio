@@ -186,6 +186,9 @@ fn editor(ui: &mut egui::Ui, i: &I18n, s: &mut Settings) {
         row(ui, i.tr("settings-grid"), |ui| {
             ui.checkbox(&mut s.show_grid, "");
         });
+        row(ui, i.tr("settings-labels"), |ui| {
+            ui.checkbox(&mut s.show_labels, "");
+        });
         row(ui, i.tr("settings-undo"), |ui| {
             ui.add(egui::DragValue::new(&mut s.undo_levels).range(settings::UNDO_LEVELS));
         });

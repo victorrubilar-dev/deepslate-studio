@@ -61,6 +61,7 @@ part-right-arm = Brazo derecho
 part-left-arm = Brazo izquierdo
 part-right-leg = Pierna derecha
 part-left-leg = Pierna izquierda
+part-label-overlay = { $part } · ext.
 part-select-hint = Clic para seleccionar la parte (sirve para el espejo y para copiar partes).
 
 untitled = Sin título
@@ -102,6 +103,7 @@ theme-dark = Oscuro
 theme-light = Claro
 settings-pixel-size = Tamaño de píxel
 settings-grid = Mostrar cuadrícula
+settings-labels = Mostrar nombres de partes
 settings-undo = Niveles de deshacer
 settings-shortcuts = Atajos
 shortcut-press = Pulsa una combinación… (Esc cancela)
