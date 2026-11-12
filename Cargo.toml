@@ -1,10 +1,11 @@
 [package]
 name = "deepslate-studio"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.95"
 license = "GPL-3.0-only"
 description = "Editor de skins de escritorio"
+repository = "https://github.com/victorrubilar-dev/deepslate-studio"
 
 [dependencies]
 bytemuck = { version = "1.25", features = ["derive"] }
@@ -26,3 +27,28 @@ lto = "thin"
 
 [target."cfg(windows)".build-dependencies]
 winresource = "0.1.34"
+
+# Paquetes de Linux. Se arman en la CI con cargo-deb y cargo-generate-rpm (no son
+# dependencias de la app). Las librerías gráficas se cargan al arrancar, por eso van
+# en «recommends»: dpkg-shlibdeps no las detecta.
+[package.metadata.deb]
+maintainer = "victorrubilar-dev <292246635+victorrubilar-dev@users.noreply.github.com>"
+section = "graphics"
+extended-description = "Editor de skins de escritorio, rápido, sin cuenta y sin publicidad. Lienzo 2D y vista 3D con poses, biblioteca de tarjetas, plantillas y cuatro idiomas."
+depends = "$auto"
+recommends = "libvulkan1, libgl1, libxkbcommon0, libwayland-client0, xdg-desktop-portal"
+assets = [
+    ["target/release/deepslate-studio", "usr/bin/", "755"],
+    ["assets/deepslate-studio.desktop", "usr/share/applications/", "644"],
+    ["assets/icon.png", "usr/share/icons/hicolor/256x256/apps/deepslate-studio.png", "644"],
+    ["README.md", "usr/share/doc/deepslate-studio/README.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Editor de skins de escritorio"
+assets = [
+    { source = "target/release/deepslate-studio", dest = "/usr/bin/deepslate-studio", mode = "755" },
+    { source = "assets/deepslate-studio.desktop", dest = "/usr/share/applications/deepslate-studio.desktop", mode = "644" },
+    { source = "assets/icon.png", dest = "/usr/share/icons/hicolor/256x256/apps/deepslate-studio.png", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/deepslate-studio/LICENSE", mode = "644", doc = true },
+]

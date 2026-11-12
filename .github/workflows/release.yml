@@ -13,7 +13,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          # 22.04 y no la última: su glibc más vieja hace que el binario y los paquetes
+          # funcionen también en Debian 12, Ubuntu 22.04 y derivadas.
+          - os: ubuntu-22.04
             name: linux-x86_64
           - os: windows-latest
             name: windows-x86_64
@@ -42,12 +44,21 @@ jobs:
             cp assets/deepslate-studio.desktop "$dir/"
             tar czf "$dir.tar.gz" "$dir"
           fi
+      - name: Paquetes .deb y .rpm
+        if: runner.os == 'Linux'
+        run: |
+          cargo install --locked cargo-deb cargo-generate-rpm
+          cargo deb --no-build
+          cargo generate-rpm
+          cp target/debian/*.deb target/generate-rpm/*.rpm .
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: |
             deepslate-studio-*.zip
             deepslate-studio-*.tar.gz
+            deepslate-studio*.deb
+            deepslate-studio*.rpm
 
   publish:
     needs: build
@@ -63,6 +74,6 @@ jobs:
         run: |
           pre=""
           case "$GITHUB_REF_NAME" in v0.*) pre="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" deepslate-studio-* \
+          gh release create "$GITHUB_REF_NAME" deepslate-studio* \
             --repo "$GITHUB_REPOSITORY" --title "Deepslate Studio ${GITHUB_REF_NAME}" \
             --generate-notes $pre

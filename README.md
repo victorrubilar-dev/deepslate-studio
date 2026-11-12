@@ -67,13 +67,25 @@
 Vamos a publicar versiones listas para usar en Linux y Windows en la sección **Releases** del repositorio. Serán las primeras versiones (0.x): ya se pueden usar, pero todavía puede haber errores y algunas cosas pueden cambiar de una versión a otra. Los proyectos guardados se seguirán abriendo en las versiones nuevas.
 
 - **Windows:** descomprime el `.zip` y abre `deepslate-studio.exe`.
-- **Linux:** descomprime el `.tar.gz` y abre `deepslate-studio`. Para que aparezca en el menú de aplicaciones con su ícono:
+- **Ubuntu, Debian, Linux Mint y derivadas:** descarga el `.deb` y ábrelo con doble clic, o instálalo desde la terminal:
+
+  ```sh
+  sudo apt install ./deepslate-studio_*_amd64.deb
+  ```
+- **Fedora, openSUSE y derivadas:** descarga el `.rpm` y ábrelo con doble clic, o:
+
+  ```sh
+  sudo dnf install ./deepslate-studio-*.x86_64.rpm
+  ```
+- **Otras distribuciones:** descomprime el `.tar.gz` y abre `deepslate-studio`. Para que aparezca en el menú de aplicaciones con su ícono:
 
   ```sh
   install -Dm755 deepslate-studio ~/.local/bin/deepslate-studio
   install -Dm644 deepslate-studio.png ~/.local/share/icons/hicolor/256x256/apps/deepslate-studio.png
   install -Dm644 deepslate-studio.desktop ~/.local/share/applications/deepslate-studio.desktop
   ```
+
+Con el `.deb` o el `.rpm`, la app queda en el menú de aplicaciones y se desinstala como cualquier otro programa.
 
 Si encuentras un error o tienes una idea, abre un *issue*.
 
