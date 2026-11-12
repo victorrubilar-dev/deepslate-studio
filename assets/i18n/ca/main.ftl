@@ -255,3 +255,12 @@ template-shirt = Samarreta
 template-pants = Pantalons
 template-hair = Cabells
 template-armor = Armadura
+
+anim-play = ▶ Anima
+anim-mirror = Mirall de la postura
+anim-target = Postura cap a la qual va i torna
+anim-speed = Velocitat
+joint-title = Ajusta la postura
+joint-hint = Fes clic en una part a la vista 3D per ajustar-ne l'articulació.
+joint-reset = Redreça
+joint-axes = X: endavant i enrere. Y: girar. Z: cap als costats.

@@ -255,3 +255,12 @@ template-shirt = Camiseta
 template-pants = Calça
 template-hair = Cabelo
 template-armor = Armadura
+
+anim-play = ▶ Animar
+anim-mirror = Espelho da pose
+anim-target = Pose para a qual vai e volta
+anim-speed = Velocidade
+joint-title = Ajustar pose
+joint-hint = Clique em uma parte na visão 3D para ajustar a articulação.
+joint-reset = Endireitar
+joint-axes = X: para frente e para trás. Y: girar. Z: para os lados.

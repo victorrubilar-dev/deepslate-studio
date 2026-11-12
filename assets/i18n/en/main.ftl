@@ -255,3 +255,12 @@ template-shirt = Shirt
 template-pants = Pants
 template-hair = Hair
 template-armor = Armor
+
+anim-play = ▶ Animate
+anim-mirror = Mirror of the pose
+anim-target = Pose it goes to and back from
+anim-speed = Speed
+joint-title = Adjust pose
+joint-hint = Click a part in the 3D view to adjust its joint.
+joint-reset = Straighten
+joint-axes = X: forward and back. Y: turn. Z: sideways.

@@ -12,7 +12,7 @@ use crate::editor::templates::{self, Template};
 use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
 use crate::project::{self, Card, Project, ProjectError};
-use crate::render3d::{Camera, Hit, PRESETS, Preset, Renderer3d, Scene, pick, project};
+use crate::render3d::{Camera, Hit, PRESETS, Pose, Preset, Renderer3d, Scene, pick, project};
 use crate::settings::{Action, NamedColor, Settings, Shortcut, StartView, Theme, View};
 use eframe::egui::{
     self, Color32, ColorImage, Key, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind,
@@ -86,6 +86,16 @@ struct PreviewState {
     cape_rev: u64,
 }
 
+/// Animación de la vista 3D: va y vuelve entre la pose de la skin y `target`.
+/// Solo se ve en pantalla; no cambia la pose guardada.
+struct Anim {
+    playing: bool,
+    /// `None`: el espejo de la pose (sirve para caminar y correr).
+    target: Option<Preset>,
+    /// Ciclos por segundo.
+    speed: f32,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum MirrorMode {
     Off,
@@ -113,6 +123,7 @@ pub struct App {
     tabs: Vec<Doc>,
     active: usize,
     lib: library_view::LibraryState,
+    anim: Anim,
     tool: Tool,
     color: Hsva,
     texture: Option<TextureHandle>,
@@ -193,6 +204,11 @@ impl App {
             tabs: vec![Doc::empty()],
             active: 0,
             lib: Default::default(),
+            anim: Anim {
+                playing: false,
+                target: None,
+                speed: 1.0,
+            },
             tool: Tool::Pencil,
             color: Hsva::from_srgba_unmultiplied([196, 92, 52, 255]),
             texture: None,
@@ -821,7 +837,41 @@ impl App {
             self.side_colors(ui);
             ui.separator();
             self.side_parts(ui);
+            if self.settings.view == View::ThreeD {
+                ui.separator();
+                self.side_joint(ui);
+            }
         });
+    }
+
+    /// Ajuste fino de la articulación de la parte seleccionada.
+    fn side_joint(&mut self, ui: &mut egui::Ui) {
+        let i = &self.i18n;
+        ui.heading(i.tr("joint-title"));
+        let Some(part) = self.selected else {
+            ui.weak(i.tr("joint-hint"));
+            return;
+        };
+        ui.label(part_name(i, part));
+        let mut pose = *self.editor.pose();
+        let angles = pose.angles_mut(part);
+        let lim = crate::render3d::ANGLE_LIMIT;
+        egui::Grid::new("joint").num_columns(2).show(ui, |ui| {
+            for (k, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
+                ui.label(axis);
+                ui.add(
+                    egui::Slider::new(&mut angles[k], -lim..=lim)
+                        .suffix("°")
+                        .step_by(1.0),
+                );
+                ui.end_row();
+            }
+        });
+        if ui.button(i.tr("joint-reset")).clicked() {
+            *angles = [0.0; 3];
+        }
+        ui.weak(i.tr("joint-axes"));
+        self.editor.set_pose(pose);
     }
 
     fn side_tools(&mut self, ui: &mut egui::Ui) {
@@ -1093,6 +1143,30 @@ impl App {
                 if let Some(p) = chosen {
                     self.editor.set_pose(p.pose());
                 }
+                ui.toggle_value(&mut self.anim.playing, i.tr("anim-play"));
+                if self.anim.playing {
+                    let shown = self
+                        .anim
+                        .target
+                        .map_or_else(|| i.tr("anim-mirror"), |p| pose_name(i, p));
+                    egui::ComboBox::from_id_salt("anim")
+                        .selected_text(shown)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.anim.target, None, i.tr("anim-mirror"));
+                            for p in PRESETS {
+                                ui.selectable_value(
+                                    &mut self.anim.target,
+                                    Some(p),
+                                    pose_name(i, p),
+                                );
+                            }
+                        })
+                        .response
+                        .on_hover_text(i.tr("anim-target"));
+                    ui.add(
+                        egui::Slider::new(&mut self.anim.speed, 0.2..=3.0).text(i.tr("anim-speed")),
+                    );
+                }
                 if ui.button(i.tr("view-reset")).clicked() {
                     self.camera = Camera::default();
                 }
@@ -1253,6 +1327,21 @@ impl App {
         }
     }
 
+    /// Pose que se dibuja: la de la skin o, con la animación en marcha, la del momento.
+    fn shown_pose(&self, ctx: &egui::Context) -> Pose {
+        let pose = *self.editor.pose();
+        if !self.anim.playing {
+            return pose;
+        }
+        let target = self
+            .anim
+            .target
+            .map_or_else(|| pose.mirrored(), Preset::pose);
+        let phase = ctx.input(|i| i.time) as f32 * self.anim.speed * std::f32::consts::TAU;
+        ctx.request_repaint();
+        pose.lerp(&target, (1.0 - phase.cos()) / 2.0)
+    }
+
     fn view3d(&mut self, ui: &mut egui::Ui, preview: bool) {
         if self.renderer.is_none() {
             ui.label(self.i18n.tr("view3d-unavailable"));
@@ -1298,17 +1387,19 @@ impl App {
                 ));
             }
         }
-        let hover = if preview {
+        // Con la animación en marcha no se pinta: el modelo no está en la pose de la skin.
+        let hover = if preview || self.anim.playing {
             None
         } else {
             self.paint_3d(ui, &resp, area)
         };
         let model = self.model_3d(preview);
+        let pose = self.shown_pose(ui.ctx());
         let editor = &self.editor;
         let visible = |p, l| preview || editor.is_visible(p, l);
         let scene = Scene {
             model,
-            pose: editor.pose(),
+            pose: &pose,
             camera: &self.camera,
             selected: if preview { None } else { self.selected },
             visible: &visible,
