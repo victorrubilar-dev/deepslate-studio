@@ -105,6 +105,15 @@ pub(super) enum Start {
     Import,
 }
 
+/// Nombre de una colección en pantalla: la de borradores va traducida.
+fn collection_label(i: &I18n, c: &str) -> String {
+    if c == library::DRAFTS {
+        i.tr("collection-drafts")
+    } else {
+        c.to_string()
+    }
+}
+
 fn start_options(i: &I18n) -> [(Start, String, String); 5] {
     [
         (
@@ -386,7 +395,7 @@ impl App {
             };
             pick(ui, None, &i.tr("collection-all"));
             for c in self.lib.collections.clone() {
-                pick(ui, Some(c.clone()), &c);
+                pick(ui, Some(c.clone()), &collection_label(i, &c));
             }
             let new = style::menu_button(ui, Icon::Plus, i.tr("collection-new"))
                 .frame_when_inactive(false);
@@ -508,14 +517,14 @@ impl App {
             Start::Empty(model) => {
                 let mut p = blank_project();
                 p.skin = crate::core::Skin::blank(model);
-                self.new_tab(p, None);
-                true
+                self.create(p);
+                false
             }
             Start::Base => {
                 let mut p = blank_project();
                 p.skin.pixels = templates::draw(Template::Base, Model::Steve, Rgba([0; 4]));
-                self.new_tab(p, None);
-                true
+                self.create(p);
+                false
             }
             Start::Open => png_dialog().pick_file().is_some_and(|p| self.open_path(p)),
             Start::Import => {
@@ -647,8 +656,11 @@ impl App {
             }
             if !collections.is_empty() {
                 ui.menu_button(i.tr("card-move"), |ui| {
-                    let targets = std::iter::once((None, i.tr("collection-none")))
-                        .chain(collections.iter().map(|c| (Some(c.clone()), c.clone())));
+                    let targets = std::iter::once((None, i.tr("collection-none"))).chain(
+                        collections
+                            .iter()
+                            .map(|c| (Some(c.clone()), collection_label(i, c))),
+                    );
                     for (c, label) in targets {
                         if ui
                             .add_enabled(c != *current, egui::Button::new(label))

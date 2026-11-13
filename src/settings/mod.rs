@@ -15,16 +15,6 @@ pub enum View {
     Library,
 }
 
-/// Vista al abrir la app: la última usada o una fija.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StartView {
-    /// La biblioteca, como página de inicio.
-    Library,
-    Last,
-    Flat,
-    ThreeD,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Theme {
     System,
@@ -195,7 +185,6 @@ pub struct Settings {
     pub palette: Vec<NamedColor>,
 
     pub language: String,
-    pub start_view: StartView,
     pub open_last: bool,
     pub last_file: Option<PathBuf>,
     /// Solo guarda proyectos que ya tienen archivo.
@@ -240,7 +229,6 @@ impl Default for Settings {
             recent_colors: Vec::new(),
             palette: Vec::new(),
             language: SYSTEM_LANGUAGE.into(),
-            start_view: StartView::Library,
             open_last: false,
             last_file: None,
             autosave: false,
@@ -439,9 +427,15 @@ mod tests {
     fn partial_and_out_of_range() {
         let path = tmp("partial");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "(pixel_size: 999.0, undo_levels: 0)").unwrap();
+        // `start_view` ya no existe: un archivo viejo que lo trae se sigue leyendo.
+        std::fs::write(
+            &path,
+            "(pixel_size: 999.0, undo_levels: 0, start_view: Last)",
+        )
+        .unwrap();
         let s = Settings::load_from(&path);
         assert_eq!((s.pixel_size, s.undo_levels, s.show_grid), (40.0, 1, true));
+        assert!(!path.with_extension("ron.bak").exists());
     }
 
     #[test]

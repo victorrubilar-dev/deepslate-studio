@@ -11,7 +11,7 @@
 ## Funciones
 
 ### Inicio
-- La app abre en la biblioteca. La primera vez, una bienvenida ofrece empezar con una skin vacía (Steve o Alex), con la plantilla base, abriendo un archivo o importando tus PNG.
+- La app abre siempre en la biblioteca, sin ninguna skin abierta. La primera vez, una bienvenida ofrece empezar con una skin vacía (Steve o Alex), con la plantilla base, abriendo un archivo o importando tus PNG.
 - **Arrastrar y soltar:** suelta skins desde el explorador de archivos para abrirlas, o sobre la biblioteca para agregarlas. Una imagen que no es skin abre «Imagen al frente».
 
 ### Biblioteca
@@ -19,6 +19,7 @@
 - **Seis fondos** dibujados para la app, o un fondo propio desde cualquier PNG.
 - **Búsqueda** por nombre o etiqueta, filtro de favoritas y orden por favoritas, fecha o nombre.
 - **Colecciones:** agrupa las skins en colecciones, que son subcarpetas de la biblioteca.
+- **Borradores:** cada skin nueva nace en la colección «Borradores» y se guarda sola mientras la editas. «Guardar como» le pone nombre y la saca de ahí. Si la cierras sin tocarla, no queda nada.
 - **Desde cada tarjeta:** abrir, editar, duplicar, mover a otra colección o eliminar.
 - Los datos de la tarjeta van dentro del PNG: si mueves o compartes el archivo, se van con él.
 
@@ -26,6 +27,7 @@
 - Varias skins abiertas a la vez, cada una con su propio deshacer, su archivo y su cámara.
 
 ### Edición
+- **Distribución:** herramientas a la izquierda, la vista al centro y un panel a la derecha con pestañas Color, Capas y Pose. Arriba, una sola barra con la vuelta a la biblioteca, las pestañas, las vistas y un menú con Archivo, Editar, Skin y Ver.
 - **Lienzo 2D:** la textura desplegada, editable píxel a píxel, con cuadrícula opcional y el nombre de cada parte.
 - **Vista 3D por defecto:** el lápiz, el borrador, aclarar, oscurecer, el bote y el cuentagotas funcionan sobre el personaje en 3D, con el píxel bajo el cursor resaltado. Se gira con el botón derecho, se acerca con la rueda y se mueve arrastrando fuera del personaje.
 - **Vista dividida** opcional: el lienzo 2D al lado del 3D.
@@ -68,7 +70,7 @@
 
 ### Ajustes
 - Atajos de teclado editables, con aviso si una combinación ya está en uso.
-- Tema claro, oscuro o del sistema, escala de la interfaz, reducir animaciones, tamaño de píxel, niveles de deshacer, vista y herramienta al iniciar.
+- Tema claro, oscuro o del sistema, escala de la interfaz, reducir animaciones, tamaño de píxel, niveles de deshacer y herramienta al iniciar.
 - Registro de errores visible desde la propia app.
 
 ## Descargas

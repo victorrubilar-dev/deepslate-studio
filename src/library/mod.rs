@@ -160,6 +160,14 @@ pub fn update_card(path: &Path, f: impl FnOnce(&mut Card)) -> Result<Card, Strin
     Ok(p.card)
 }
 
+/// Colección donde nacen las skins nuevas. El nombre en disco es fijo; la interfaz lo traduce.
+pub const DRAFTS: &str = "drafts";
+
+/// `true` si `path` es un borrador de la biblioteca `dir`.
+pub fn is_draft(dir: &Path, path: &Path) -> bool {
+    path.parent() == Some(dir.join(DRAFTS).as_path())
+}
+
 /// `dir/nombre.png`, o `dir/nombre-2.png`, `-3`… si ya existe.
 pub fn free_path(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(format!("{name}.png"));
@@ -308,6 +316,15 @@ mod tests {
         let back = move_to(&moved, &dir, None).unwrap();
         assert_eq!(back, dir.join("zeta-2.png"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drafts_are_only_direct_children() {
+        let dir = Path::new("biblioteca");
+        assert!(is_draft(dir, &dir.join(DRAFTS).join("a.png")));
+        assert!(!is_draft(dir, &dir.join("a.png")));
+        assert!(!is_draft(dir, &dir.join("Piratas").join("a.png")));
+        assert!(!is_draft(dir, &dir.join(DRAFTS).join("x").join("a.png")));
     }
 
     #[test]

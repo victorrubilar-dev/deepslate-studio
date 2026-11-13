@@ -172,8 +172,6 @@ lang-es = Español
 lang-en = English
 lang-pt = Português
 lang-ca = Català
-settings-start-view = Visão ao iniciar
-start-view-last = A última usada
 settings-open-last = Abrir a última skin ao iniciar
 settings-reduce-motion = Reduzir animações
 settings-autosave = Salvamento automático
@@ -332,3 +330,12 @@ recover-question = Da última vez o app fechou de forma inesperada e ficaram { $
 recover-yes = Recuperar
 recover-no = Descartar
 status-recovered = { $count } skins recuperadas. Salve-as para não perdê-las.
+
+# Menus reorganizados e rascunhos
+app-name = Deepslate Studio
+menu-main = Menu
+menu-skin = Skin
+back-library = Voltar para a biblioteca. As skins abertas continuam abertas.
+back-editor = Voltar ao editor
+collection-drafts = Rascunhos
+draft-name = Rascunho

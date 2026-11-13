@@ -3,7 +3,7 @@
 use super::{App, Dialog, action_name, shortcut_label, shortcut_of, theme_pref};
 use crate::editor::Tool;
 use crate::i18n::I18n;
-use crate::settings::{self, ACTIONS, Action, Settings, StartView, Theme};
+use crate::settings::{self, ACTIONS, Action, Settings, Theme};
 use eframe::egui::{self, Key};
 
 /// Lista desplegable para elegir entre valores con nombre.
@@ -185,19 +185,6 @@ fn general(ui: &mut egui::Ui, i: &I18n, s: &mut Settings) {
                     (Theme::System, i.tr("theme-system")),
                     (Theme::Dark, i.tr("theme-dark")),
                     (Theme::Light, i.tr("theme-light")),
-                ],
-            )
-        });
-        row(ui, i.tr("settings-start-view"), |ui| {
-            combo(
-                ui,
-                "start-view",
-                &mut s.start_view,
-                &[
-                    (StartView::Library, i.tr("view-library")),
-                    (StartView::Last, i.tr("start-view-last")),
-                    (StartView::Flat, i.tr("view-2d")),
-                    (StartView::ThreeD, i.tr("view-3d")),
                 ],
             )
         });
