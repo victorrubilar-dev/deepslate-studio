@@ -172,8 +172,6 @@ lang-es = Español
 lang-en = English
 lang-pt = Português
 lang-ca = Català
-settings-start-view = Vista en iniciar
-start-view-last = L'última feta servir
 settings-open-last = Obre l'última skin en iniciar
 settings-reduce-motion = Redueix les animacions
 settings-autosave = Desament automàtic
@@ -332,3 +330,12 @@ recover-question = L'última vegada l'aplicació es va tancar de manera inespera
 recover-yes = Recupera
 recover-no = Descarta
 status-recovered = S'han recuperat { $count } skins. Desa-les per no perdre-les.
+
+# Menús reordenats i esborranys
+app-name = Deepslate Studio
+menu-main = Menú
+menu-skin = Skin
+back-library = Torna a la biblioteca. Les skins obertes continuen obertes.
+back-editor = Torna a l'editor
+collection-drafts = Esborranys
+draft-name = Esborrany

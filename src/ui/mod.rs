@@ -13,11 +13,12 @@ use crate::editor::image_import::{Fit, fit, to_front};
 use crate::editor::templates::{self, Template};
 use crate::editor::{ERASE, Editor, Mirror, PartMask, Tool};
 use crate::i18n::I18n;
+use crate::library;
 use crate::project::{self, Card, Project, ProjectError};
 use crate::render3d::{
     Camera, FOV_DEG, Hit, PRESETS, Pose, Preset, Renderer3d, Scene, part_center, pick, project,
 };
-use crate::settings::{Action, NamedColor, Settings, Shortcut, StartView, Theme, View};
+use crate::settings::{Action, NamedColor, Settings, Shortcut, Theme, View};
 use eframe::egui::{
     self, Color32, ColorImage, Key, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind,
     TextureHandle, TextureOptions, Vec2, color_picker, ecolor::Hsva,
@@ -235,6 +236,14 @@ enum MirrorMode {
     Selected,
 }
 
+/// Pestaña del panel derecho del editor.
+#[derive(Clone, Copy, PartialEq)]
+enum SideTab {
+    Color,
+    Layers,
+    Pose,
+}
+
 #[derive(Clone, Copy)]
 enum Choice {
     Accept,
@@ -254,6 +263,12 @@ pub struct App {
     card: Card,
     tabs: Vec<Doc>,
     active: usize,
+    /// `false`: no hay ninguna skin abierta y `tabs` guarda solo un hueco vacío.
+    doc_open: bool,
+    /// Borradores creados en esta sesión: si se cierran sin tocarlos, se borran.
+    fresh_drafts: Vec<PathBuf>,
+    last_draft_save: f64,
+    side_tab: SideTab,
     lib: library_view::LibraryState,
     anim: Anim,
     tool: Tool,
@@ -317,13 +332,13 @@ impl App {
             .unwrap_or_default();
         style::apply(&cc.egui_ctx);
         cc.egui_ctx.set_theme(theme_pref(settings.theme));
+        // Siempre se empieza en la biblioteca; la vista guardada es a la que vuelve el editor.
         let mut settings = settings;
-        match settings.start_view {
-            StartView::Last => {}
-            StartView::Library => settings.view = View::Library,
-            StartView::Flat => settings.view = View::Flat,
-            StartView::ThreeD => settings.view = View::ThreeD,
-        }
+        let return_view = match settings.view {
+            View::Library => View::ThreeD,
+            v => v,
+        };
+        settings.view = View::Library;
         if cc.wgpu_render_state.is_none() {
             log::warn!("sin wgpu: la vista 3D no estará disponible");
         }
@@ -347,6 +362,10 @@ impl App {
             card: Card::default(),
             tabs: vec![Doc::empty()],
             active: 0,
+            doc_open: false,
+            fresh_drafts: Vec::new(),
+            last_draft_save: 0.0,
+            side_tab: SideTab::Color,
             lib: Default::default(),
             anim: Anim {
                 playing: false,
@@ -400,6 +419,7 @@ impl App {
             new_color_name: String::new(),
         };
         app.tool = start_tool;
+        app.lib.return_view = return_view;
         let leftovers: Vec<PathBuf> = recovery_dir()
             .and_then(|d| std::fs::read_dir(d).ok())
             .into_iter()
@@ -411,14 +431,11 @@ impl App {
         if !leftovers.is_empty() {
             app.dialog = Some(Dialog::Recover(leftovers));
         }
-        let from_args = std::env::args_os().nth(1).is_some();
+        // Abrir un archivo desde el explorador, o la última skin, lleva directo al editor.
         if let Some(path) = last.filter(|p| p.exists())
             && app.open_path(path)
-            && from_args
-            && app.settings.view == View::Library
         {
-            // Abrir un archivo desde el explorador lleva directo al editor.
-            app.settings.view = View::ThreeD;
+            app.settings.view = return_view;
         }
         app
     }
@@ -444,6 +461,7 @@ impl App {
     // ---- Archivo ----
 
     fn request(&mut self, ctx: &egui::Context, after: After) {
+        self.save_drafts();
         if let After::Close = after
             && let Some(i) = (0..self.tabs.len()).find(|&i| self.tab_dirty(i))
         {
@@ -514,16 +532,104 @@ impl App {
         self.uploaded = None;
     }
 
+    /// Abre la skin en una pestaña nueva, o en la activa si está vacía y sin usar.
     fn new_tab(&mut self, project: Project, path: Option<PathBuf>) {
-        self.tabs.push(Doc::empty());
-        self.switch_tab(self.tabs.len() - 1);
+        if self.doc_open && !self.active_is_untouched() {
+            self.tabs.push(Doc::empty());
+            self.switch_tab(self.tabs.len() - 1);
+        }
         self.set_project(project, path);
+        self.doc_open = true;
     }
 
-    /// Cierra la pestaña activa sin preguntar. La última se reemplaza por una vacía.
+    /// Skin nueva: nace como borrador en la biblioteca y se guarda sola mientras se edita.
+    /// Sin carpeta de biblioteca, queda sin archivo, como antes.
+    fn create(&mut self, project: Project) {
+        let draft = library_view::library_dir(&self.settings).map(|d| {
+            let dir = d.join(library::DRAFTS);
+            let path = library::free_path(&dir, &self.i18n.tr("draft-name"));
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| {
+                    std::fs::write(
+                        &path,
+                        project::save(&project.skin, &project.pose, &project.card),
+                    )
+                })
+                .map(|()| path)
+        });
+        let path = match draft {
+            Some(Ok(path)) => {
+                self.fresh_drafts.push(path.clone());
+                self.lib.stale = true;
+                Some(path)
+            }
+            Some(Err(e)) => {
+                log::error!("borrador: {e}");
+                None
+            }
+            None => None,
+        };
+        self.new_tab(project, path);
+        if self.settings.view == View::Library {
+            self.settings.view = self.lib.return_view;
+            self.settings_changed = true;
+        }
+    }
+
+    fn is_draft(&self, path: &Path) -> bool {
+        library_view::library_dir(&self.settings).is_some_and(|d| library::is_draft(&d, path))
+    }
+
+    /// Guarda sin preguntar los borradores con cambios, abiertos o en otras pestañas.
+    fn save_drafts(&mut self) {
+        if self.painting {
+            return;
+        }
+        let Some(dir) = library_view::library_dir(&self.settings) else {
+            return;
+        };
+        let active = std::iter::once((&mut self.editor, &self.path, &self.card));
+        let others = self
+            .tabs
+            .iter_mut()
+            .enumerate()
+            .filter(|(k, _)| *k != self.active)
+            .map(|(_, d)| (&mut d.editor, &d.path, &d.card));
+        for (editor, path, card) in active.chain(others) {
+            if let (true, Some(path)) = (editor.is_dirty(), path)
+                && library::is_draft(&dir, path)
+            {
+                match std::fs::write(path, project::save(editor.skin(), editor.pose(), card)) {
+                    Ok(()) => editor.mark_saved(),
+                    Err(e) => log::error!("borrador {}: {e}", path.display()),
+                }
+            }
+        }
+    }
+
+    /// Un borrador de esta sesión que se cierra sin haberlo tocado no queda en la biblioteca.
+    fn drop_if_unused(&mut self, editor: &Editor, path: Option<&Path>) {
+        if let Some(path) = path
+            && !editor.can_undo()
+            && let Some(k) = self.fresh_drafts.iter().position(|p| p == path)
+        {
+            self.fresh_drafts.remove(k);
+            if let Err(e) = std::fs::remove_file(path) {
+                log::warn!("borrador sin usar {}: {e}", path.display());
+            }
+            self.lib.stale = true;
+        }
+    }
+
+    /// Cierra la pestaña activa sin preguntar. Al cerrar la última se vuelve a la biblioteca.
     fn close_tab(&mut self) {
+        let path = self.path.clone();
+        let editor = std::mem::replace(&mut self.editor, Editor::new(Skin::blank(Model::Steve), 1));
+        self.drop_if_unused(&editor, path.as_deref());
         if self.tabs.len() == 1 {
             self.set_project(blank_project(), None);
+            self.doc_open = false;
+            self.settings.view = View::Library;
             return;
         }
         self.tabs.remove(self.active);
@@ -565,51 +671,124 @@ impl App {
         self.path.is_none() && !self.editor.is_dirty() && !self.editor.can_undo()
     }
 
-    fn tab_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let mut switch = None;
-        let mut close = None;
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            for i in 0..self.tabs.len() {
-                let name = self
-                    .tab_path(i)
-                    .map_or_else(|| self.i18n.tr("untitled"), file_name);
-                let label = if self.tab_dirty(i) {
-                    format!("{name} •")
-                } else {
-                    name
-                };
-                let tab = style::tab(ui, None, &label, i == self.active);
-                if i == self.active {
-                    style::slide_marker(ui, egui::Id::unique("tab-marker"), tab.rect);
-                }
-                if tab.clicked() {
-                    switch = Some(i);
-                }
-                if tab.middle_clicked() {
-                    close = Some(i);
-                }
-                let x = egui::Button::image(
-                    icons::image(ctx, Icon::Close).fit_to_exact_size(Vec2::splat(12.0)),
-                )
-                .image_tint_follows_text_color(true)
-                .frame_when_inactive(false);
-                if ui.add(x).on_hover_text(self.i18n.tr("tab-close")).clicked() {
-                    close = Some(i);
-                }
-                ui.add_space(10.0);
-            }
-            let plus = egui::Button::image(icons::image(ctx, Icon::Plus))
-                .image_tint_follows_text_color(true)
-                .frame_when_inactive(false);
-            if ui
-                .add(plus)
-                .on_hover_text(self.i18n.tr("file-new"))
+    /// Barra única del editor: volver a la biblioteca y pestañas a la izquierda; vistas,
+    /// menú y ajustes a la derecha.
+    fn top_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if style::icon_button(ui, Icon::Settings, false, &self.i18n.tr("menu-settings"))
                 .clicked()
             {
-                self.new_tab(blank_project(), None);
+                self.show_settings = true;
             }
+            let more = egui::Button::image(icons::image(ctx, Icon::More))
+                .image_tint_follows_text_color(true)
+                .min_size(Vec2::splat(32.0));
+            egui::containers::menu::MenuButton::from_button(more)
+                .ui(ui, |ui| self.main_menu(ui))
+                .0
+                .on_hover_text(self.i18n.tr("menu-main"));
+            ui.separator();
+            // De derecha a izquierda: el orden en pantalla queda 3D, 2D, Vista previa.
+            for (view, icon, key) in [
+                (View::Preview, Icon::Preview, "view-preview"),
+                (View::Flat, Icon::Flat, "view-2d"),
+                (View::ThreeD, Icon::Cube, "view-3d"),
+            ] {
+                let on = self.settings.view == view;
+                let resp = style::tab(ui, Some(icon), &self.i18n.tr(key), on);
+                if on {
+                    style::slide_marker(ui, egui::Id::unique("view-marker"), resp.rect);
+                }
+                if resp.clicked() {
+                    self.settings.view = view;
+                }
+            }
+            ui.separator();
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let back = style::menu_button(ui, Icon::Library, self.i18n.tr("view-library"))
+                    .frame_when_inactive(false);
+                if ui
+                    .add(back)
+                    .on_hover_text(self.i18n.tr("back-library"))
+                    .clicked()
+                {
+                    self.settings.view = View::Library;
+                }
+                ui.separator();
+                egui::ScrollArea::horizontal()
+                    .id_salt("tabs")
+                    .show(ui, |ui| ui.horizontal(|ui| self.tabs_row(ui, ctx)));
+            });
         });
+    }
+
+    /// Barra de la biblioteca: el nombre de la app, volver al editor si hay skins abiertas,
+    /// y los ajustes.
+    fn library_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(self.i18n.tr("app-name"))
+                    .font(style::pixel_font(style::SIZE_UI)),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if style::icon_button(ui, Icon::Settings, false, &self.i18n.tr("menu-settings"))
+                    .clicked()
+                {
+                    self.show_settings = true;
+                }
+                if self.doc_open {
+                    let back = style::menu_button(ui, Icon::Cube, self.i18n.tr("back-editor"));
+                    if ui.add(back).clicked() {
+                        self.settings.view = self.lib.return_view;
+                    }
+                }
+            });
+        });
+    }
+
+    fn tabs_row(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut switch = None;
+        let mut close = None;
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for i in 0..self.tabs.len() {
+            let name = self
+                .tab_path(i)
+                .map_or_else(|| self.i18n.tr("untitled"), file_name);
+            let label = if self.tab_dirty(i) {
+                format!("{name} •")
+            } else {
+                name
+            };
+            let tab = style::tab(ui, None, &label, i == self.active);
+            if i == self.active {
+                style::slide_marker(ui, egui::Id::unique("tab-marker"), tab.rect);
+            }
+            if tab.clicked() {
+                switch = Some(i);
+            }
+            if tab.middle_clicked() {
+                close = Some(i);
+            }
+            let x = egui::Button::image(
+                icons::image(ctx, Icon::Close).fit_to_exact_size(Vec2::splat(12.0)),
+            )
+            .image_tint_follows_text_color(true)
+            .frame_when_inactive(false);
+            if ui.add(x).on_hover_text(self.i18n.tr("tab-close")).clicked() {
+                close = Some(i);
+            }
+            ui.add_space(10.0);
+        }
+        let plus = egui::Button::image(icons::image(ctx, Icon::Plus))
+            .image_tint_follows_text_color(true)
+            .frame_when_inactive(false);
+        if ui
+            .add(plus)
+            .on_hover_text(self.i18n.tr("file-new"))
+            .clicked()
+        {
+            self.create(blank_project());
+        }
         if let Some(i) = switch {
             self.switch_tab(i);
         }
@@ -656,12 +835,7 @@ impl App {
                 self.status = self.i18n.tr_args(key, &[("file", file_name(&path).into())]);
                 log::info!("abierto {}", path.display());
                 self.remember_file(&path);
-                let path = is_project.then_some(path);
-                if self.active_is_untouched() {
-                    self.set_project(project, path);
-                } else {
-                    self.new_tab(project, path);
-                }
+                self.new_tab(project, is_project.then_some(path));
                 true
             }
             Err(e) => {
@@ -786,6 +960,17 @@ impl App {
                     .tr_args("status-saved", &[("file", file_name(&path).into())]);
                 log::info!("guardado {}", path.display());
                 self.remember_file(&path);
+                // «Guardar como» desde un borrador lo saca de Borradores: el original sobra.
+                if let Some(old) = self.path.take()
+                    && old != path
+                    && self.is_draft(&old)
+                {
+                    if let Err(e) = std::fs::remove_file(&old) {
+                        log::warn!("borrador {}: {e}", old.display());
+                    }
+                    self.fresh_drafts.retain(|p| *p != old);
+                    self.lib.stale = true;
+                }
                 self.path = Some(path);
                 true
             }
@@ -867,12 +1052,16 @@ impl App {
 
     /// Guarda cada N minutos si hay cambios y el proyecto ya tiene archivo.
     fn autosave(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if now - self.last_draft_save >= DRAFT_SAVE_SECS && self.dialog.is_none() {
+            self.save_drafts();
+            self.last_draft_save = now;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(DRAFT_SAVE_SECS));
         if !self.settings.autosave {
             return;
         }
         let period = self.settings.autosave_minutes as f64 * 60.0;
-        let now = ctx.input(|i| i.time);
-        ctx.request_repaint_after(std::time::Duration::from_secs(30));
         if now - self.last_autosave < period {
             return;
         }
@@ -984,13 +1173,16 @@ impl App {
             })
         });
         if let Some(action) = pressed.and_then(|sc| self.settings.action_for(&sc)) {
-            self.act(ctx, action);
+            // En la biblioteca solo valen los atajos que no tocan una skin abierta.
+            if self.settings.view != View::Library || matches!(action, Action::New | Action::Open) {
+                self.act(ctx, action);
+            }
         }
     }
 
     fn act(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::New => self.new_tab(blank_project(), None),
+            Action::New => self.create(blank_project()),
             Action::Open => self.open(),
             Action::CloseTab => self.request(ctx, After::CloseTab),
             Action::NextTab => self.switch_tab((self.active + 1) % self.tabs.len()),
@@ -1114,6 +1306,9 @@ impl App {
     }
 
     fn handle_close(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.save_drafts();
+        }
         if ctx.input(|i| i.viewport().close_requested())
             && !self.closing
             && (0..self.tabs.len()).any(|i| self.tab_dirty(i))
@@ -1125,141 +1320,135 @@ impl App {
 
     // ---- Paneles ----
 
-    fn menu(&mut self, ui: &mut egui::Ui) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button(self.i18n.tr("menu-file"), |ui| {
-                self.menu_item(ui, Action::New);
-                if ui
-                    .add(style::menu_button(
-                        ui,
-                        Icon::New,
-                        self.i18n.tr("file-new-base"),
-                    ))
-                    .clicked()
-                {
-                    let skin = Skin {
-                        pixels: templates::draw(Template::Base, Model::Steve, self.primary()),
-                        model: Model::Steve,
-                    };
-                    self.new_tab(
-                        Project {
-                            skin,
-                            ..blank_project()
-                        },
-                        None,
-                    );
-                }
-                self.menu_item(ui, Action::Open);
-                self.menu_item(ui, Action::CloseTab);
-                ui.separator();
-                self.menu_item(ui, Action::Save);
-                self.menu_item(ui, Action::SaveAs);
-                self.menu_item(ui, Action::Export);
-                self.menu_item(ui, Action::QuickExport);
-            });
-            ui.menu_button(self.i18n.tr("menu-edit"), |ui| {
-                self.menu_item(ui, Action::Undo);
-                self.menu_item(ui, Action::Redo);
-                ui.separator();
-                self.menu_item(ui, Action::CopySelection);
-                self.menu_item(ui, Action::EraseSelection);
-                self.menu_item(ui, Action::Deselect);
-                ui.separator();
-                self.menu_item(ui, Action::CopyParts);
-                self.menu_item(ui, Action::PasteParts);
-                ui.separator();
-                if ui
-                    .add(style::menu_button(
-                        ui,
-                        Icon::Open,
-                        self.i18n.tr("edit-image-front"),
-                    ))
-                    .clicked()
-                {
-                    self.import_image();
-                }
-                if ui
-                    .add(style::menu_button(
-                        ui,
-                        Icon::Swap,
-                        self.i18n.tr("edit-replace-color"),
-                    ))
-                    .clicked()
-                {
-                    self.dialog = Some(Dialog::ReplaceColor(
-                        self.color,
-                        self.color2,
-                        self.selected.is_some(),
-                    ));
-                }
-                if ui
-                    .add(style::menu_button(
-                        ui,
-                        Icon::Noise,
-                        self.i18n.tr("edit-vary"),
-                    ))
-                    .on_hover_text(self.i18n.tr("edit-vary-hint"))
-                    .clicked()
-                {
-                    // Con selección, la selección; si no, la parte elegida o toda la skin.
-                    let part = self.selected.filter(|_| self.editor.selection().is_none());
-                    let seed = ui.input(|i| i.time).to_bits();
-                    self.editor.vary(part, 10, seed);
-                }
-                ui.menu_button(self.i18n.tr("edit-apply-template"), |ui| {
-                    ui.weak(self.i18n.tr("template-color-note"));
-                    for (t, name) in [
-                        (Template::Shirt, self.i18n.tr("template-shirt")),
-                        (Template::Pants, self.i18n.tr("template-pants")),
-                        (Template::Hair, self.i18n.tr("template-hair")),
-                        (Template::Armor, self.i18n.tr("template-armor")),
-                    ] {
-                        if ui.button(name).clicked() {
-                            let layer =
-                                templates::draw(t, self.editor.skin().model, self.primary());
-                            self.editor.apply_layer(&layer);
-                        }
-                    }
+    /// Contenido del botón de menú del editor: Archivo, Editar, Skin y Ver.
+    fn main_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(self.i18n.tr("menu-file"), |ui| {
+            self.menu_item(ui, Action::New);
+            if ui
+                .add(style::menu_button(
+                    ui,
+                    Icon::New,
+                    self.i18n.tr("file-new-base"),
+                ))
+                .clicked()
+            {
+                let skin = Skin {
+                    pixels: templates::draw(Template::Base, Model::Steve, self.primary()),
+                    model: Model::Steve,
+                };
+                self.create(Project {
+                    skin,
+                    ..blank_project()
                 });
-            });
-            ui.menu_button(self.i18n.tr("menu-view"), |ui| {
-                self.menu_item(ui, Action::ToggleOverlay);
-                ui.separator();
-                for a in [
-                    Action::ViewFront,
-                    Action::ViewBack,
-                    Action::ViewSide,
-                    Action::FocusPart,
+            }
+            self.menu_item(ui, Action::Open);
+            self.menu_item(ui, Action::CloseTab);
+            ui.separator();
+            self.menu_item(ui, Action::Save);
+            self.menu_item(ui, Action::SaveAs);
+            ui.separator();
+            self.menu_item(ui, Action::Export);
+            self.menu_item(ui, Action::QuickExport);
+        });
+        ui.menu_button(self.i18n.tr("menu-edit"), |ui| {
+            self.menu_item(ui, Action::Undo);
+            self.menu_item(ui, Action::Redo);
+            ui.separator();
+            self.menu_item(ui, Action::CopySelection);
+            self.menu_item(ui, Action::EraseSelection);
+            self.menu_item(ui, Action::Deselect);
+            ui.separator();
+            self.menu_item(ui, Action::CopyParts);
+            self.menu_item(ui, Action::PasteParts);
+        });
+        ui.menu_button(self.i18n.tr("menu-skin"), |ui| {
+            if ui
+                .add(style::menu_button(
+                    ui,
+                    Icon::Open,
+                    self.i18n.tr("edit-image-front"),
+                ))
+                .clicked()
+            {
+                self.import_image();
+            }
+            if ui
+                .add(style::menu_button(
+                    ui,
+                    Icon::Swap,
+                    self.i18n.tr("edit-replace-color"),
+                ))
+                .clicked()
+            {
+                self.dialog = Some(Dialog::ReplaceColor(
+                    self.color,
+                    self.color2,
+                    self.selected.is_some(),
+                ));
+            }
+            if ui
+                .add(style::menu_button(
+                    ui,
+                    Icon::Noise,
+                    self.i18n.tr("edit-vary"),
+                ))
+                .on_hover_text(self.i18n.tr("edit-vary-hint"))
+                .clicked()
+            {
+                // Con selección, la selección; si no, la parte elegida o toda la skin.
+                let part = self.selected.filter(|_| self.editor.selection().is_none());
+                let seed = ui.input(|i| i.time).to_bits();
+                self.editor.vary(part, 10, seed);
+            }
+            ui.menu_button(self.i18n.tr("edit-apply-template"), |ui| {
+                ui.weak(self.i18n.tr("template-color-note"));
+                for (t, name) in [
+                    (Template::Shirt, self.i18n.tr("template-shirt")),
+                    (Template::Pants, self.i18n.tr("template-pants")),
+                    (Template::Hair, self.i18n.tr("template-hair")),
+                    (Template::Armor, self.i18n.tr("template-armor")),
                 ] {
-                    self.menu_item(ui, a);
-                }
-                ui.separator();
-                let label = self.i18n.tr("view-split");
-                if ui
-                    .add(egui::Checkbox::new(&mut self.settings.split_view, label))
-                    .changed()
-                {
-                    self.settings_changed = true;
+                    if ui.button(name).clicked() {
+                        let layer = templates::draw(t, self.editor.skin().model, self.primary());
+                        self.editor.apply_layer(&layer);
+                    }
                 }
             });
-            let settings = style::menu_button(ui, Icon::Settings, self.i18n.tr("menu-settings"))
-                .frame_when_inactive(false);
-            if ui.add(settings).clicked() {
-                self.show_settings = true;
+        });
+        ui.menu_button(self.i18n.tr("menu-view"), |ui| {
+            self.menu_item(ui, Action::ToggleOverlay);
+            ui.separator();
+            for a in [
+                Action::ViewFront,
+                Action::ViewBack,
+                Action::ViewSide,
+                Action::FocusPart,
+            ] {
+                self.menu_item(ui, a);
+            }
+            ui.separator();
+            let label = self.i18n.tr("view-split");
+            if ui
+                .add(egui::Checkbox::new(&mut self.settings.split_view, label))
+                .changed()
+            {
+                self.settings_changed = true;
             }
         });
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let name = self
-                .path
-                .as_deref()
-                .map(file_name)
-                .unwrap_or_else(|| self.i18n.tr("untitled"));
-            let mark = if self.editor.is_dirty() { " •" } else { "" };
-            ui.label(format!("{name}{mark}"));
-            ui.separator();
+            if self.settings.view != View::Library {
+                let name = self
+                    .path
+                    .as_deref()
+                    .map(file_name)
+                    .unwrap_or_else(|| self.i18n.tr("untitled"));
+                let mark = if self.editor.is_dirty() { " •" } else { "" };
+                ui.label(format!("{name}{mark}"));
+                ui.separator();
+            }
             let id = egui::Id::unique("status-since");
             let now = ui.input(|i| i.time);
             let (text, since) = ui
@@ -1277,16 +1466,97 @@ impl App {
         });
     }
 
+    /// Panel derecho: Color, Capas y, en las vistas 3D, Pose.
     fn side(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            self.side_tools(ui);
-            ui.separator();
-            self.side_colors(ui);
-            ui.separator();
-            self.side_parts(ui);
-            if self.settings.view == View::ThreeD {
+        let has_pose = self.settings.view != View::Flat;
+        if self.side_tab == SideTab::Pose && !has_pose {
+            self.side_tab = SideTab::Color;
+        }
+        ui.horizontal(|ui| {
+            let tabs = [
+                (SideTab::Color, Icon::Fill, "color"),
+                (SideTab::Layers, Icon::Library, "layers"),
+                (SideTab::Pose, Icon::Cube, "pose"),
+            ];
+            for (tab, icon, key) in tabs
+                .into_iter()
+                .filter(|t| has_pose || t.0 != SideTab::Pose)
+            {
+                let on = self.side_tab == tab;
+                let resp = style::tab(ui, Some(icon), &self.i18n.tr(key), on);
+                if on {
+                    style::slide_marker(ui, egui::Id::unique("side-marker"), resp.rect);
+                }
+                if resp.clicked() {
+                    self.side_tab = tab;
+                }
+            }
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| match self.side_tab {
+            SideTab::Color => self.side_colors(ui),
+            SideTab::Layers => self.side_parts(ui),
+            SideTab::Pose => {
+                self.side_pose(ui);
                 ui.separator();
                 self.side_joint(ui);
+            }
+        });
+    }
+
+    /// Pose, animación, cámara y captura de la vista 3D.
+    fn side_pose(&mut self, ui: &mut egui::Ui) {
+        let i = &self.i18n;
+        style::section(ui, Icon::Cube, &i.tr("pose"));
+        let current = Preset::matching(self.editor.pose())
+            .map_or_else(|| i.tr("pose-custom"), |p| pose_name(i, p));
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("pose")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                for p in PRESETS {
+                    if ui.button(pose_name(i, p)).clicked() {
+                        chosen = Some(p);
+                    }
+                }
+            });
+        if let Some(p) = chosen {
+            self.editor.set_pose(p.pose());
+        }
+        ui.toggle_value(
+            &mut self.anim.playing,
+            (icons::image(ui.ctx(), Icon::Play), i.tr("anim-play")),
+        );
+        if self.anim.playing {
+            let shown = self
+                .anim
+                .target
+                .map_or_else(|| i.tr("anim-mirror"), |p| pose_name(i, p));
+            egui::ComboBox::from_id_salt("anim")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.anim.target, None, i.tr("anim-mirror"));
+                    for p in PRESETS {
+                        ui.selectable_value(&mut self.anim.target, Some(p), pose_name(i, p));
+                    }
+                })
+                .response
+                .on_hover_text(i.tr("anim-target"));
+            ui.add(egui::Slider::new(&mut self.anim.speed, 0.2..=3.0).text(i.tr("anim-speed")));
+        }
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add(style::menu_button(ui, Icon::Reset, i.tr("view-reset")))
+                .clicked()
+            {
+                self.camera = Camera::default();
+            }
+            if ui
+                .add(style::menu_button(ui, Icon::Camera, i.tr("capture")))
+                .clicked()
+            {
+                self.dialog = Some(Dialog::Render(1024, true));
             }
         });
     }
@@ -1321,59 +1591,85 @@ impl App {
         self.editor.set_pose(pose);
     }
 
-    fn side_tools(&mut self, ui: &mut egui::Ui) {
+    /// Tira izquierda: herramientas, pincel, espejo y deshacer, solo con íconos.
+    fn tool_strip(&mut self, ui: &mut egui::Ui) {
+        let can = [Action::Undo, Action::Redo].map(|a| self.can(a));
+        let mut run = None;
         let i = &self.i18n;
-        style::section(ui, Icon::Pencil, &i.tr("tools"));
-        let mut current = String::new();
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::splat(4.0);
-            for (tool, action) in [
-                (Tool::Pencil, Action::Pencil),
-                (Tool::Eraser, Action::Eraser),
-                (Tool::Fill, Action::Fill),
-                (Tool::Picker, Action::Picker),
-                (Tool::Gradient, Action::Gradient),
-                (Tool::Stamp, Action::Stamp),
-                (Tool::Select, Action::Select),
-                (Tool::Lighten, Action::Lighten),
-                (Tool::Darken, Action::Darken),
-            ] {
-                let name = action_name(i, action);
-                let tip = match self.settings.shortcut(action) {
-                    Some(sc) => format!("{name} ({})", shortcut_label(i, &sc)),
-                    None => name.clone(),
+        ui.spacing_mut().item_spacing = Vec2::splat(4.0);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                for (tool, action) in [
+                    (Tool::Pencil, Action::Pencil),
+                    (Tool::Eraser, Action::Eraser),
+                    (Tool::Fill, Action::Fill),
+                    (Tool::Picker, Action::Picker),
+                    (Tool::Gradient, Action::Gradient),
+                    (Tool::Stamp, Action::Stamp),
+                    (Tool::Select, Action::Select),
+                    (Tool::Lighten, Action::Lighten),
+                    (Tool::Darken, Action::Darken),
+                ] {
+                    let name = action_name(i, action);
+                    let mut tip = match self.settings.shortcut(action) {
+                        Some(sc) => format!("{name} ({})", shortcut_label(i, &sc)),
+                        None => name,
+                    };
+                    if matches!(
+                        tool,
+                        Tool::Pencil | Tool::Eraser | Tool::Lighten | Tool::Darken
+                    ) {
+                        tip = format!("{tip}\n{}", i.tr("line-hint"));
+                    }
+                    if tool == Tool::Stamp && self.stamp.is_none() {
+                        tip = format!("{tip}\n{}", i.tr("stamp-empty"));
+                    }
+                    let icon = action_icon(action).unwrap_or(Icon::Pencil);
+                    if style::icon_button(ui, icon, self.tool == tool, &tip).clicked() {
+                        self.tool = tool;
+                    }
+                }
+                ui.separator();
+                let brush_tip = format!("{}\n{}", i.tr("brush-size"), i.tr("brush-hint"));
+                for (n, label) in [(1, "1×1"), (2, "2×2")] {
+                    ui.selectable_value(&mut self.brush, n, label)
+                        .on_hover_text(&brush_tip);
+                }
+                ui.separator();
+                let mode = match self.mirror {
+                    MirrorMode::Off => i.tr("mirror-off"),
+                    MirrorMode::All => i.tr("mirror-all"),
+                    MirrorMode::Selected if self.selected.is_none() => {
+                        format!("{}\n{}", i.tr("mirror-part"), i.tr("mirror-pick-part"))
+                    }
+                    MirrorMode::Selected => i.tr("mirror-part"),
                 };
-                let icon = action_icon(action).unwrap_or(Icon::Pencil);
-                let resp = style::icon_button(ui, icon, self.tool == tool, &tip);
-                if resp.clicked() {
-                    self.tool = tool;
+                let tip = format!("{}: {mode}", i.tr("mirror"));
+                let on = self.mirror != MirrorMode::Off;
+                if style::icon_button(ui, Icon::Mirror, on, &tip).clicked() {
+                    self.mirror = match self.mirror {
+                        MirrorMode::Off => MirrorMode::All,
+                        MirrorMode::All => MirrorMode::Selected,
+                        MirrorMode::Selected => MirrorMode::Off,
+                    };
                 }
-                if tool == Tool::Stamp && self.stamp.is_none() {
-                    resp.on_hover_text(i.tr("stamp-empty"));
+                ui.separator();
+                for (action, can) in [Action::Undo, Action::Redo].into_iter().zip(can) {
+                    let tip = action_name(i, action);
+                    let icon = action_icon(action).unwrap_or(Icon::Blank);
+                    if ui
+                        .add_enabled_ui(can, |ui| style::icon_button(ui, icon, false, &tip))
+                        .inner
+                        .clicked()
+                    {
+                        run = Some(action);
+                    }
                 }
-                if self.tool == tool {
-                    current = name;
-                }
-            }
+            });
         });
-        ui.label(egui::RichText::new(current).font(style::pixel_font(style::SIZE_UI)));
-        ui.horizontal(|ui| {
-            ui.label(i.tr("brush-size"));
-            ui.selectable_value(&mut self.brush, 1, "1×1");
-            ui.selectable_value(&mut self.brush, 2, "2×2");
-        })
-        .response
-        .on_hover_text(i.tr("brush-hint"));
-        ui.weak(i.tr("line-hint"));
-        ui.horizontal_wrapped(|ui| {
-            ui.add(icons::image(ui.ctx(), Icon::Mirror).tint(ui.visuals().text_color()));
-            ui.label(i.tr("mirror"));
-            ui.selectable_value(&mut self.mirror, MirrorMode::Off, i.tr("mirror-off"));
-            ui.selectable_value(&mut self.mirror, MirrorMode::All, i.tr("mirror-all"));
-            ui.selectable_value(&mut self.mirror, MirrorMode::Selected, i.tr("mirror-part"));
-        });
-        if self.mirror == MirrorMode::Selected && self.selected.is_none() {
-            ui.weak(i.tr("mirror-pick-part"));
+        if let Some(action) = run {
+            let ctx = ui.ctx().clone();
+            self.act(&ctx, action);
         }
     }
 
@@ -1591,102 +1887,9 @@ impl App {
     }
 
     fn central(&mut self, ui: &mut egui::Ui) {
-        let before = self.settings.view;
-        if before != View::Library {
-            self.lib.return_view = before;
-        }
-        let view3d = matches!(before, View::ThreeD | View::Preview);
-        ui.horizontal_wrapped(|ui| {
-            let i = &self.i18n;
-            for (view, icon, key) in [
-                (View::Library, Icon::Library, "view-library"),
-                (View::ThreeD, Icon::Cube, "view-3d"),
-                (View::Flat, Icon::Flat, "view-2d"),
-                (View::Preview, Icon::Preview, "view-preview"),
-            ] {
-                let on = self.settings.view == view;
-                let resp = style::tab(ui, Some(icon), &i.tr(key), on);
-                if on {
-                    style::slide_marker(ui, egui::Id::unique("view-marker"), resp.rect);
-                }
-                if resp.clicked() {
-                    self.settings.view = view;
-                }
-                if view == View::Library {
-                    ui.separator();
-                }
-            }
-            if view3d {
-                ui.separator();
-                ui.label(i.tr("pose"));
-                let current = Preset::matching(self.editor.pose())
-                    .map_or_else(|| i.tr("pose-custom"), |p| pose_name(i, p));
-                let mut chosen = None;
-                egui::ComboBox::from_id_salt("pose")
-                    .selected_text(current)
-                    .show_ui(ui, |ui| {
-                        for p in PRESETS {
-                            if ui.button(pose_name(i, p)).clicked() {
-                                chosen = Some(p);
-                            }
-                        }
-                    });
-                if let Some(p) = chosen {
-                    self.editor.set_pose(p.pose());
-                }
-                ui.toggle_value(
-                    &mut self.anim.playing,
-                    (icons::image(ui.ctx(), Icon::Play), i.tr("anim-play")),
-                );
-                if self.anim.playing {
-                    let shown = self
-                        .anim
-                        .target
-                        .map_or_else(|| i.tr("anim-mirror"), |p| pose_name(i, p));
-                    egui::ComboBox::from_id_salt("anim")
-                        .selected_text(shown)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.anim.target, None, i.tr("anim-mirror"));
-                            for p in PRESETS {
-                                ui.selectable_value(
-                                    &mut self.anim.target,
-                                    Some(p),
-                                    pose_name(i, p),
-                                );
-                            }
-                        })
-                        .response
-                        .on_hover_text(i.tr("anim-target"));
-                    ui.add(
-                        egui::Slider::new(&mut self.anim.speed, 0.2..=3.0).text(i.tr("anim-speed")),
-                    );
-                }
-                if ui
-                    .add(style::menu_button(ui, Icon::Reset, i.tr("view-reset")))
-                    .clicked()
-                {
-                    self.camera = Camera::default();
-                }
-                if ui
-                    .add(style::menu_button(ui, Icon::Camera, i.tr("capture")))
-                    .clicked()
-                {
-                    self.dialog = Some(Dialog::Render(1024, true));
-                }
-            }
-        });
         if self.settings.view == View::Preview {
             self.preview_bar(ui);
         }
-        if self.settings.view != before {
-            self.settings_changed = true;
-            // Al entrar a la biblioteca se vuelve a leer la carpeta: puede haber cambiado afuera.
-            if self.settings.view == View::Library {
-                self.lib.stale = true;
-                self.lib.shown_at = ui.input(|i| i.time);
-            }
-        }
-        ui.separator();
         match self.settings.view {
             View::Library => self.library(ui),
             View::Flat => self.canvas(ui, self.settings.pixel_size),
@@ -2750,6 +2953,16 @@ impl App {
 impl eframe::App for App {
     /// Cierre normal: lo que haya en la carpeta de recuperación ya no hace falta.
     fn on_exit(&mut self) {
+        self.save_drafts();
+        let active = (self.editor.can_undo(), self.path.clone());
+        let others = (0..self.tabs.len())
+            .filter(|&i| i != self.active)
+            .map(|i| (self.tabs[i].editor.can_undo(), self.tabs[i].path.clone()));
+        for (used, path) in std::iter::once(active).chain(others).collect::<Vec<_>>() {
+            if !used && let Some(p) = path.filter(|p| self.fresh_drafts.contains(p)) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
         if let Some(d) = recovery_dir() {
             let _ = std::fs::remove_dir_all(d);
         }
@@ -2768,23 +2981,51 @@ impl eframe::App for App {
             ctx.set_zoom_factor(scale);
             self.applied_scale = scale;
         }
+        // Sin skin abierta no hay editor que mostrar.
+        if !self.doc_open {
+            self.settings.view = View::Library;
+        }
+        let before = self.settings.view;
         self.handle_close(&ctx);
         self.handle_drops(&ctx);
         self.shortcuts(&ctx);
         self.autosave(&ctx);
         self.write_recovery(&ctx);
-        egui::Panel::top("menu").show(ui, |ui| self.menu(ui));
-        egui::Panel::top("tabs").show(ui, |ui| self.tab_bar(ui, &ctx));
+        let library = self.settings.view == View::Library;
+        egui::Panel::top("bar").show(ui, |ui| {
+            if library {
+                self.library_bar(ui);
+            } else {
+                self.top_bar(ui, &ctx);
+            }
+        });
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        if self.settings.view != View::Library {
+        if !library {
             egui::Panel::left("tools")
-                .default_size(260.0)
+                .resizable(false)
+                .exact_size(48.0)
+                .show(ui, |ui| self.tool_strip(ui));
+            egui::Panel::right("side")
+                .default_size(270.0)
                 .show(ui, |ui| self.side(ui));
         }
         egui::CentralPanel::default_margins().show(ui, |ui| self.central(ui));
         self.settings_window(&ctx);
         self.log_window(&ctx);
         self.dialogs(&ctx);
+        // Al final: los diálogos también cambian de vista (cerrar la última pestaña).
+        if self.settings.view != before {
+            self.settings_changed = true;
+            if before != View::Library {
+                self.lib.return_view = before;
+            }
+            // Al entrar a la biblioteca se vuelve a leer la carpeta: puede haber cambiado afuera.
+            if self.settings.view == View::Library {
+                self.save_drafts();
+                self.lib.stale = true;
+                self.lib.shown_at = ctx.input(|i| i.time);
+            }
+        }
     }
 }
 
@@ -2826,6 +3067,8 @@ fn swatch(ui: &mut egui::Ui, c: [u8; 4]) -> egui::Response {
 }
 
 const PALETTE_IMPORT_MAX: usize = 32;
+/// Cada cuánto se guardan solos los borradores con cambios.
+const DRAFT_SAVE_SECS: f64 = 5.0;
 /// Cuánto se puede desplazar la cámara libre, en píxeles de la skin.
 const PAN_MAX: f32 = 40.0;
 
