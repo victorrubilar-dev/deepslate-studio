@@ -75,9 +75,11 @@
 
 ## Descargas
 
-Vamos a publicar versiones listas para usar en Linux y Windows en la sección **Releases** del repositorio. Serán las primeras versiones (0.x): ya se pueden usar, pero todavía puede haber errores y algunas cosas pueden cambiar de una versión a otra. Los proyectos guardados se seguirán abriendo en las versiones nuevas.
+Las versiones listas para usar en Linux y Windows están en la sección **Releases** del repositorio. Son las primeras versiones (0.x): ya se pueden usar, pero todavía puede haber errores y algunas cosas pueden cambiar de una versión a otra. Los proyectos guardados se seguirán abriendo en las versiones nuevas.
 
 - **Windows:** descomprime el `.zip` y abre `deepslate-studio.exe`.
+
+  El `.exe` no tiene firma digital: un certificado de firma de código cuesta dinero cada año, y este es un proyecto independiente. Por eso, la primera vez que lo abras, Windows SmartScreen puede mostrar «Windows protegió su PC». Para abrirlo, pulsa **Más información** y después **Ejecutar de todas formas**. Si prefieres no hacerlo, puedes compilarlo tú mismo desde el código (ver [Instalar desde el código](#instalar-desde-el-código)).
 - **Ubuntu, Debian, Linux Mint y derivadas:** descarga el `.deb` y ábrelo con doble clic, o instálalo desde la terminal:
 
   ```sh
