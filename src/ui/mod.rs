@@ -391,7 +391,7 @@ impl App {
             uploaded: None,
             cape_uploaded: None,
             pv: PreviewState {
-                base: PreviewBase::Mannequin,
+                base: PreviewBase::Current,
                 skin: None,
                 skin_rev: 0,
                 cape: true,
@@ -1920,13 +1920,13 @@ impl App {
             ui.label(i.tr("preview-base"));
             ui.selectable_value(
                 &mut self.pv.base,
-                PreviewBase::Mannequin,
-                i.tr("preview-mannequin"),
+                PreviewBase::Current,
+                i.tr("preview-current"),
             );
             ui.selectable_value(
                 &mut self.pv.base,
-                PreviewBase::Current,
-                i.tr("preview-current"),
+                PreviewBase::Mannequin,
+                i.tr("preview-mannequin"),
             );
             if self.pv.skin.is_some() {
                 ui.selectable_value(
